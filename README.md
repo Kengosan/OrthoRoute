@@ -11,7 +11,7 @@
 ## Technical Philosophy
 
 ### Core Principles
-1. **Portability First**
+1. **Portability First** - Zero compilation
 2. **Scalability** - Designed to handle 8K+ nets on modern GPUs
 3. **Memory Efficiency** - Tiled processing and compressed state management
 4. **Conflict Resolution** - Negotiated congestion as primary algorithm, not afterthought
