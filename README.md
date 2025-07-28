@@ -1,6 +1,8 @@
-<img src="/Assets/icon200.png" width="200" align="right"/>
+<img src="/Assets/icon200.png" width="200" align="left"/>
 
-# OrthoRoute: GPU-Accelerated PCB Autorouter
+# OrthoRoute: GPU-Accelerated PCB Autorouter <nbsp><nbsp>
+
+
 **OrthoRoute** is a GPU-accelerated PCB autorouter, designed for massively parallel routing of complex circuit boards. Unlike traditional CPU-based autorouters that process nets sequentially, OrthoRoute leverages thousands of CUDA cores to route nets simultaneously using modern GPU compute.
 
 **Key Innovation:** Pure Python + CuPy implementation for maximum portability - no compilation required, just install CuPy and run!
