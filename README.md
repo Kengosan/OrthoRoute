@@ -11,7 +11,15 @@
 ## Technical Philosophy
 
 ### Core Principles
-1. **Portability First** - Python + CuPy means no compilation, no build dependencies
+1. **Portability First**### Project Structure
+
+project_structure = """
+OrthoRoute/
+├── orthoroute/                    # Main package
+│   ├── __init__.py               # Package initialization
+│   ├── gpu_engine.py             # OrthoRouteEngine implementation
+│   ├── grid_manager.py           # GPUGrid and TileManager
+│   └── design_rules.py           # DRC constants and validationCuPy means no compilation, no build dependencies
 2. **Scalability** - Designed to handle 8K+ nets on modern GPUs
 3. **Memory Efficiency** - Tiled processing and compressed state management
 4. **Conflict Resolution** - Negotiated congestion as primary algorithm, not afterthought
@@ -100,17 +108,17 @@ cp -r kicad_plugin/* "$PLUGIN_DIR"
    - Route import and validation
    - User interface
 
-2. **GPU Routing Engine** (`orthoroute_gpu.py`)
-   - CuPy-based parallel algorithms
-   - Memory-efficient data structures
-   - Wavefront pathfinding
-   - Conflict resolution
+2. **GPU Routing Engine** (`gpu_engine.py`)
+   - CuPy-based OrthoRouteEngine class
+   - GPU device management
+   - Memory optimization
+   - Parallel routing algorithms
 
-3. **Grid Management** (`orthoroute_grid.py`)
-   - Tiled grid processing
-   - Obstacle marking
-   - Via site management
-   - Design rule checking
+3. **Grid Management** (`grid_manager.py`)
+   - GPUGrid class for grid operations
+   - TileManager for memory efficiency
+   - Obstacle and via handling
+   - Unit conversion and grid mapping
 
 4. **Steiner Tree Builder** (`orthoroute_steiner.py`)
    - Multi-pin net handling
@@ -156,22 +164,27 @@ def expand_wavefront_parallel(grid, current_wave, distance):
 **Solution:** Process board in 64×64 tiles that fit in GPU shared memory
 
 ```python
-class TileProcessor:
-    def __init__(self, tile_size=64):
+class TileManager:
+    def __init__(self, grid: GPUGrid, tile_size: int = 64):
+        self.grid = grid
         self.tile_size = tile_size
-        self.shared_memory_size = tile_size * tile_size * 4  # 16KB per tile
+        self.tiles_x = (grid.width + tile_size - 1) // tile_size
+        self.tiles_y = (grid.height + tile_size - 1) // tile_size
+        
+        print(f"Tile configuration: {self.tiles_x}×{self.tiles_y} tiles "
+              f"of {tile_size}×{tile_size}")
     
-    def process_tile(self, global_grid, tile_x, tile_y, nets_batch):
-        # Load tile to GPU shared memory
-        tile_data = load_tile_to_shared(global_grid, tile_x, tile_y)
+    def extract_tile(self, tile_x: int, tile_y: int) -> Dict[str, cp.ndarray]:
+        """Extract tile data to GPU shared memory equivalent"""
+        x_start, y_start, x_end, y_end = self.get_tile_bounds(tile_x, tile_y)
         
-        # Route nets within tile
-        for net in nets_batch:
-            if net_intersects_tile(net, tile_x, tile_y):
-                route_net_in_tile(tile_data, net)
-        
-        # Write results back to global grid
-        write_tile_to_global(global_grid, tile_data, tile_x, tile_y)
+        tile_data = {
+            'availability': self.grid.availability[:, y_start:y_end, x_start:x_end].copy(),
+            'congestion': self.grid.congestion_cost[:, y_start:y_end, x_start:x_end].copy(),
+            'distance': self.grid.distance_map[:, y_start:y_end, x_start:x_end].copy(),
+            'bounds': (x_start, y_start, x_end, y_end)
+        }
+        return tile_data
 ```
 
 ### 3. Negotiated Congestion Routing
@@ -357,10 +370,16 @@ pip install -e .
 ```python
 import cupy as cp
 from orthoroute.gpu_engine import OrthoRouteEngine
+from orthoroute.grid_manager import GPUGrid
 
-# Verify installation
+# Initialize engine
 engine = OrthoRouteEngine()
+
+# Create test grid (50mm x 50mm board)
+grid = GPUGrid(width=500, height=500, layers=4)  # 0.1mm pitch
+
 print("OrthoRoute ready!")
+print(f"Grid dimensions: {grid.width}×{grid.height}×{grid.layers}")
 ```
 
 ### KiCad Plugin Setup
@@ -631,10 +650,10 @@ OrthoRoute/
 │   ├── route_import.py           # JSON → KiCad tracks/vias
 │   └── ui_dialogs.py             # Configuration GUI
 ├── tests/                         # Test suite
-│   ├── test_gpu_engine.py        # Core engine tests
-│   ├── test_algorithms.py        # Algorithm validation
-│   ├── benchmark_boards/         # Performance test cases
-│   └── integration_tests.py      # End-to-end testing
+│   ├── test_utils.py            # Test utilities and fixtures
+│   ├── test_gpu_engine_mock.py  # GPU engine mock tests
+│   ├── benchmark_boards/        # Performance test cases
+│   └── integration_tests.py     # End-to-end testing
 ├── examples/                      # Example usage
 │   ├── simple_board.py           # Basic routing example
 │   ├── hypercube_backplane.py    # Complex board example
@@ -674,33 +693,34 @@ black orthoroute/ kicad_plugin/
 
 ## Future Roadmap
 
-### Phase 1: Core Implementation 
-- Basic CuPy routing engine
-- KiCad integration
-- Simple test cases
-- Performance benchmarks
+### Phase 1: Core Implementation ✓
+- ✓ Basic CuPy routing engine
+- ✓ GPU grid management
+- ✓ Mock testing framework
+- ✓ Memory optimization
 
-### Phase 2: Advanced Features (Q2 2025)
-- Real-time visualization
-- Interactive routing
-- Advanced design rules
-- Differential pair routing
+### Phase 2: Current Work (Q3 2025)
+- ⚡ KiCad plugin integration
+- ⚡ Board import/export
+- ⚡ Design rule implementation
+- Basic routing algorithms
 
-### Phase 3: Optimization & Scale (Q3 2025)
-- Multi-GPU support
-- Cloud deployment
-- Machine learning optimization
-- Advanced conflict resolution
+### Phase 3: Future Features (Q4 2025)
+- Advanced routing strategies
+- Multi-pin net support
+- Interactive visualization
+- Performance optimization
 
 ## Support & Community
 
 ### Getting Help
 - **GitHub Issues:** Bug reports and feature requests
 
-### Success Stories
-- **Hypercube Backplane:** 8,192 nets routed in 2 minutes
-- **Server Motherboard:** 4,000 nets, 95% success rate
-- **FPGA Development Board:** Complex routing in under 30 seconds
+### Development Status
+- **Core Engine:** Basic GPU infrastructure complete
+- **Grid Management:** Tiled processing implemented
+- **Testing:** Mock framework and unit tests in place
+- **Next Steps:** KiCad integration and routing algorithms
 
 **Acknowledgments:**
 - Inspired by the original Connection Machine architecture
