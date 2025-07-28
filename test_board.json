@@ -1,0 +1,36 @@
+{
+    "bounds": {
+        "width_nm": 50000000,
+        "height_nm": 50000000,
+        "layers": 2
+    },
+    "grid": {
+        "pitch_nm": 100000,
+        "via_size_nm": 200000
+    },
+    "nets": [
+        {
+            "id": 1,
+            "name": "TEST_NET1",
+            "pins": [
+                {"x": 5000000, "y": 5000000, "layer": 0},
+                {"x": 45000000, "y": 45000000, "layer": 1}
+            ],
+            "width_nm": 200000
+        },
+        {
+            "id": 2,
+            "name": "TEST_NET2",
+            "pins": [
+                {"x": 45000000, "y": 5000000, "layer": 0},
+                {"x": 5000000, "y": 45000000, "layer": 1}
+            ],
+            "width_nm": 200000
+        }
+    ],
+    "design_rules": {
+        "min_track_width_nm": 200000,
+        "min_clearance_nm": 200000,
+        "min_via_size_nm": 400000
+    }
+}

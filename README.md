@@ -43,11 +43,58 @@
                                └─────────────────┘
 ```
 
+### Installation
+
+1. **Install OrthoRoute Package:**
+```bash
+# Clone repository
+git clone https://github.com/bbenchoff/OrthoRoute.git
+cd OrthoRoute
+
+# Install package
+pip install .
+```
+
+2. **Install GPU Dependencies:**
+```bash
+# For CUDA 12.x:
+pip install cupy-cuda12x
+
+# For CUDA 11.x:
+pip install cupy-cuda11x
+```
+
+3. **Install KiCad Plugin:**
+
+Windows:
+```powershell
+$PLUGIN_DIR="$env:APPDATA\kicad\7.0\3rdparty\plugins\OrthoRoute"
+mkdir -p $PLUGIN_DIR
+cp -r kicad_plugin\* $PLUGIN_DIR
+```
+
+Linux:
+```bash
+PLUGIN_DIR="~/.local/share/kicad/7.0/3rdparty/plugins/OrthoRoute"
+mkdir -p $PLUGIN_DIR
+cp -r kicad_plugin/* $PLUGIN_DIR
+```
+
+macOS:
+```bash
+PLUGIN_DIR="~/Library/Application Support/kicad/7.0/3rdparty/plugins/OrthoRoute"
+mkdir -p "$PLUGIN_DIR"
+cp -r kicad_plugin/* "$PLUGIN_DIR"
+```
+
+4. **Restart KiCad**
+
 ### Component Architecture
 
-1. **KiCad Integration** (`orthoroute_kicad.py`)
+1. **KiCad Integration** (`kicad_plugin/`)
    - Board data extraction
    - Net filtering and prioritization
+   - Plugin UI and configuration
    - Route import and validation
    - User interface
 
@@ -267,10 +314,27 @@ performance_targets = {
 
 ## Installation & Quick Start
 
-### Prerequisites
-- **NVIDIA GPU** with CUDA Compute Capability 7.5+
-- **CUDA Toolkit 11.8+ or 12.x**
-- **Python 3.8+**
+### System Requirements
+
+#### Minimum Requirements
+- Python 3.8 or higher
+- NVIDIA GPU with Compute Capability 7.5+
+- CUDA Toolkit 11.8+ or 12.x
+- 8GB GPU RAM for basic boards
+- 16GB System RAM
+
+#### Python Dependencies
+```bash
+# Core dependencies
+cupy-cuda12x>=12.0.0  # For CUDA 12.x
+numpy>=1.21.0
+scipy>=1.7.0
+networkx>=2.6.0
+
+# Optional dependencies
+matplotlib>=3.4.0  # For visualization
+pytest>=6.0.0  # For testing
+```
 
 ### Installation
 ```bash
@@ -337,6 +401,127 @@ if results['success']:
 3. Configure grid settings (pitch, layers, iterations)
 4. Click "Start GPU Routing"
 5. Routes are automatically applied to your board
+
+## Error Handling
+
+### Common Issues and Solutions
+
+1. **GPU Memory Errors**
+```python
+try:
+    engine = OrthoRouteEngine()
+except RuntimeError as e:
+    if "out of memory" in str(e):
+        print("GPU memory exceeded - try reducing batch size")
+    else:
+        print(f"GPU error: {e}")
+```
+
+2. **Invalid Board Data**
+```python
+def validate_board_data(board_data):
+    required_fields = ['bounds', 'grid', 'nets']
+    missing = [f for f in required_fields if f not in board_data]
+    if missing:
+        raise ValueError(f"Missing required fields: {missing}")
+```
+
+3. **Network Errors**
+```python
+try:
+    with open(input_file, 'r') as f:
+        board_data = json.load(f)
+except (FileNotFoundError, json.JSONDecodeError) as e:
+    print(f"Error loading board data: {e}")
+```
+
+## Configuration Management
+
+### Environment Variables
+```bash
+# GPU Selection
+ORTHOROUTE_GPU_ID=0  # Select specific GPU
+ORTHOROUTE_MEMORY_LIMIT=8192  # Limit GPU memory usage (MB)
+
+# Performance Tuning
+ORTHOROUTE_BATCH_SIZE=256  # Routing batch size
+ORTHOROUTE_TILE_SIZE=64   # Processing tile size
+ORTHOROUTE_MAX_ITERATIONS=30  # Maximum routing iterations
+
+# Debug Options
+ORTHOROUTE_DEBUG=1        # Enable debug logging
+ORTHOROUTE_PROFILE=1      # Enable performance profiling
+```
+
+### Configuration File
+```json
+{
+    "gpu": {
+        "device_id": 0,
+        "memory_limit_mb": 8192,
+        "compute_mode": "default"
+    },
+    "routing": {
+        "batch_size": 256,
+        "tile_size": 64,
+        "max_iterations": 30,
+        "via_cost": 10,
+        "congestion_factor": 1.5
+    },
+    "design_rules": {
+        "min_track_width_nm": 100000,
+        "min_clearance_nm": 150000,
+        "min_via_size_nm": 200000
+    },
+    "debug": {
+        "logging_level": "INFO",
+        "profile_memory": true,
+        "save_iterations": false
+    }
+}
+```
+
+## Troubleshooting Guide
+
+### Common Issues
+
+1. **GPU Memory Errors**
+   - Reduce batch size
+   - Enable tiled processing
+   - Monitor with nvidia-smi
+   - Check for memory leaks
+
+2. **Performance Issues**
+   - Optimize grid pitch
+   - Tune batch size
+   - Enable profiling
+   - Check GPU utilization
+
+3. **DRC Violations**
+   - Verify design rules
+   - Check clearance settings
+   - Validate via parameters
+   - Review layer constraints
+
+### Error Recovery
+
+```python
+try:
+    engine = OrthoRouteEngine()
+    engine.load_board(board_data)
+except GPUMemoryError:
+    # Try with reduced memory usage
+    config = engine.config
+    config['batch_size'] //= 2
+    config['tile_size'] = 32
+    engine = OrthoRouteEngine(config)
+except CUDADriverError:
+    # Fall back to CPU mode
+    engine = OrthoRouteEngine(mode='cpu')
+finally:
+    # Clean up resources
+    engine.cleanup()
+```
 
 ## Implementation Details
 
@@ -425,22 +610,42 @@ def evaluate_route_quality(routes, design_rules):
 
 ## Development & Contributing
 
-### Project Structure
-```
+## Project Structure
+
+project_structure = """
 OrthoRoute/
 ├── orthoroute/                    # Main package
-│   ├── gpu_engine.py             # Core GPU routing engine
-│   ├── grid_manager.py           # Grid data structures
-│   ├── routing_algorithms.py     # Wavefront & conflict resolution
-│   └── visualization.py          # Real-time display
+│   ├── __init__.py               # Package initialization
+│   ├── gpu_engine.py             # Core GPU routing engine (CuPy)
+│   ├── grid_manager.py           # Grid data structures and tiling
+│   ├── routing_algorithms.py     # Wavefront, A*, conflict resolution
+│   ├── steiner_tree.py           # Multi-pin net handling
+│   ├── design_rules.py           # DRC and validation
+│   └── visualization.py          # Real-time routing display
 ├── kicad_plugin/                  # KiCad integration
-│   ├── orthoroute_kicad.py       # Main plugin
-│   ├── board_export.py           # Data conversion
-│   └── route_import.py           # Result application
+│   ├── __init__.py               # Plugin registration
+│   ├── orthoroute_kicad.py       # Main KiCad plugin
+│   ├── board_export.py           # KiCad → JSON conversion
+│   ├── route_import.py           # JSON → KiCad tracks/vias
+│   └── ui_dialogs.py             # Configuration GUI
 ├── tests/                         # Test suite
-├── examples/                      # Usage examples
-└── docs/                          # Documentation
-```
+│   ├── test_gpu_engine.py        # Core engine tests
+│   ├── test_algorithms.py        # Algorithm validation
+│   ├── benchmark_boards/         # Performance test cases
+│   └── integration_tests.py      # End-to-end testing
+├── examples/                      # Example usage
+│   ├── simple_board.py           # Basic routing example
+│   ├── hypercube_backplane.py    # Complex board example
+│   └── performance_test.py       # Benchmark script
+├── docs/                          # Documentation
+│   ├── README.md                 # This design document
+│   ├── installation.md           # Setup instructions
+│   ├── api_reference.md          # API documentation
+│   └── performance_guide.md      # Optimization tips
+├── requirements.txt               # Python dependencies
+├── setup.py                      # Package installation
+└── orthoroute_cli.py             # Command-line interface
+"""
 
 ### Development Setup
 ```bash
@@ -495,8 +700,9 @@ black orthoroute/ kicad_plugin/
 - **Server Motherboard:** 4,000 nets, 95% success rate
 - **FPGA Development Board:** Complex routing in under 30 seconds
 
-
 **Acknowledgments:**
 - Inspired by the original Connection Machine architecture
 - Built on the shoulders of the CuPy and CUDA ecosystem
 - Thanks to the KiCad community for extensible design tools
+
+
