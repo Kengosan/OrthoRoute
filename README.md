@@ -2,11 +2,9 @@
 
 # OrthoRoute: GPU-Accelerated PCB Autorouter
 
-<nbsp>
+**OrthoRoute** is a GPU-accelerated PCB autorouter, designed for massively parallel routing of complex circuit boards. Unlike traditional CPU-based autorouters that process nets sequentially, OrthoRoute leverages thousands of CUDA cores to route nets simultaneously using modern GPU compute.
 
 ## Project Overview
-
-**OrthoRoute** is a GPU-accelerated PCB autorouter, designed for massively parallel routing of complex circuit boards. Unlike traditional CPU-based autorouters that process nets sequentially, OrthoRoute leverages thousands of CUDA cores to route nets simultaneously using modern GPU compute.
 
 **Key Innovation:** Pure Python + CuPy implementation for maximum portability - no compilation required, just install CuPy and run!
 
@@ -346,6 +344,24 @@ pytest>=6.0.0  # For testing
 ```
 
 ### Installation
+
+**Windows Quick Install (Recommended)**
+
+Method 1 - Using File Explorer:
+1. Download and extract OrthoRoute
+2. Right-click on `install_windows.ps1`
+3. Select "Run with PowerShell as administrator"
+
+Method 2 - Using PowerShell:
+1. Press `Windows + X` key combination
+2. Click "Windows PowerShell (Admin)" or "Terminal (Admin)"
+3. Navigate to the OrthoRoute directory:
+```powershell
+cd "path\to\OrthoRoute"  # Replace with your actual path
+.\install_windows.ps1
+```
+
+**Manual Installation (Advanced Users)**
 ```bash
 # Install CuPy (choose based on CUDA version)
 pip install cupy-cuda12x  # For CUDA 12.x
