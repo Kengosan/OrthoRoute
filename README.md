@@ -4,22 +4,14 @@
 
 ## Project Overview
 
-**OrthoRoute** is the world's first GPU-accelerated PCB autorouter, designed for massively parallel routing of complex circuit boards. Unlike traditional CPU-based autorouters that process nets sequentially, OrthoRoute leverages thousands of CUDA cores to route nets simultaneously using modern GPU compute.
+**OrthoRoute** is a GPU-accelerated PCB autorouter, designed for massively parallel routing of complex circuit boards. Unlike traditional CPU-based autorouters that process nets sequentially, OrthoRoute leverages thousands of CUDA cores to route nets simultaneously using modern GPU compute.
 
 **Key Innovation:** Pure Python + CuPy implementation for maximum portability - no compilation required, just install CuPy and run!
 
 ## Technical Philosophy
 
 ### Core Principles
-1. **Portability First**### Project Structure
-
-project_structure = """
-OrthoRoute/
-├── orthoroute/                    # Main package
-│   ├── __init__.py               # Package initialization
-│   ├── gpu_engine.py             # OrthoRouteEngine implementation
-│   ├── grid_manager.py           # GPUGrid and TileManager
-│   └── design_rules.py           # DRC constants and validationCuPy means no compilation, no build dependencies
+1. **Portability First**
 2. **Scalability** - Designed to handle 8K+ nets on modern GPUs
 3. **Memory Efficiency** - Tiled processing and compressed state management
 4. **Conflict Resolution** - Negotiated congestion as primary algorithm, not afterthought
