@@ -1,4 +1,4 @@
-<img src="/Assets/icon200.png" width="400" align="right"/>
+<img src="/Assets/icon200.png" width="200" align="right"/>
 
 # OrthoRoute: GPU-Accelerated PCB Autorouter
 
