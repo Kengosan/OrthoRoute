@@ -80,9 +80,14 @@ class OrthoRouteKiCadPlugin(pcbnew.ActionPlugin):
         
         try:
             # Import here to avoid import errors if CuPy not available
-            from orthoroute.gpu_engine import OrthoRouteEngine
-            from .board_export import BoardExporter
-            from .route_import import RouteImporter
+            import orthoroute.gpu_engine as gpu_engine
+            import board_export
+            import route_import
+            
+            # Create instances
+            engine = gpu_engine.OrthoRouteEngine()
+            exporter = board_export.BoardExporter(board)
+            importer = route_import.RouteImporter(board)
             
             # Step 1: Export board data
             progress.Update(10, "Exporting board data...")
@@ -223,8 +228,12 @@ class OrthoRouteConfigDialog(wx.Dialog):
                 'width_nm': int(self.width_ctrl.GetValue() * 1000000),
                 'congestion_factor': self.cong_ctrl.GetValue(),
                 'max_iterations': self.iter_ctrl.GetValue()
+            },
+            'options': {
+                'skip_power_nets': True,
+                'skip_routed_nets': True,
+                'include_existing_tracks': True,
+                'include_component_keepouts': True,
+                'include_edge_keepouts': True
             }
-            'grid_pitch_mm': self.pitch_ctrl.GetValue(),
-            'max_layers': self.layer_ctrl.GetValue(),
-            'max_iterations': self.iter_ctrl.GetValue()
         }

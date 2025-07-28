@@ -8,6 +8,27 @@ import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
+class OrthoRouteEngine:
+    def __init__(self):
+        """Initialize the GPU routing engine."""
+        print("OrthoRoute GPU Engine initialized on device 0")
+        self._print_gpu_info()
+        
+    def _print_gpu_info(self):
+        """Print GPU information."""
+        device = cp.cuda.Device()
+        print("\nGPU Information:")
+        print(f"Device ID: {device.id}")
+        try:
+            mem_info = device.mem_info()
+            if isinstance(mem_info, (list, tuple)) and len(mem_info) >= 2:
+                total_mem = float(mem_info[1]) / (1024**3)
+                print(f"Global Memory: {total_mem:.1f} GB")
+            else:
+                print("Global Memory: Unknown (testing environment)")
+        except (AttributeError, TypeError, IndexError, ValueError):
+            print("Global Memory: Unknown (testing environment)")
+
 @dataclass
 class Point3D:
     """3D point with integer coordinates"""

@@ -1,0 +1,2 @@
+cupy-cuda12x
+numpy>=1.20.0
