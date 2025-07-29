@@ -100,27 +100,39 @@ For more details, visit: https://docs.cupy.dev/en/stable/install.html"""
             try:
                 # Export board data
                 progress_dlg.Update(10, "Exporting board data...")
+                print("Exporting board data...")
                 board_data = self._export_board_data(board)
+                print(f"Exported {len(board_data.get('nets', []))} nets")
+                
+                if not board_data.get('nets'):
+                    wx.MessageBox("No nets found to route. Please ensure your PCB has nets with pads.", 
+                                "No Nets Found", wx.OK | wx.ICON_WARNING)
+                    return
                 
                 # Initialize GPU engine
-                progress_dlg.Update(20, "Initializing GPU engine...")
+                progress_dlg.Update(20, "Initializing routing engine...")
+                print("Initializing routing engine...")
                 from .orthoroute_engine import OrthoRouteEngine
                 engine = OrthoRouteEngine()
                 
                 # Enable visualization if requested
                 if config.get('enable_visualization', False):
                     progress_dlg.Update(30, "Setting up visualization...")
+                    print("Setting up visualization...")
                     engine.enable_visualization({
                         'real_time': True,
                         'show_progress': True
                     })
                 
                 # Route the board
-                progress_dlg.Update(40, "Starting GPU routing...")
+                progress_dlg.Update(40, "Starting routing...")
+                print("Starting routing...")
                 results = engine.route(board_data, config)
+                print(f"Routing completed with success={results.get('success', False)}")
                 
                 progress_dlg.Update(80, "Importing routes...")
                 if results['success']:
+                    print("Importing routes...")
                     self._import_routes(board, results)
                     progress_dlg.Update(100, "Routing complete!")
                     
@@ -136,12 +148,15 @@ Statistics:
 • Total nets: {total_nets}
 • Successfully routed: {successful_nets}
 • Success rate: {success_rate:.1f}%
-• Time: {stats.get('total_time_seconds', 0):.1f} seconds"""
+• Time: {stats.get('total_time_seconds', 0):.1f} seconds
+
+Note: Check the PCB editor to see the routed tracks."""
                     
                     wx.MessageBox(message, "Routing Complete", 
                                 wx.OK | wx.ICON_INFORMATION)
                 else:
                     error = results.get('error', 'Unknown error')
+                    print(f"Routing failed: {error}")
                     wx.MessageBox(f"Routing failed: {error}", 
                                 "Routing Error", wx.OK | wx.ICON_ERROR)
                     
@@ -167,35 +182,60 @@ Statistics:
         
         # Extract nets
         nets = []
-        netlist = board.GetNetlist()
         
-        for net_code in range(1, netlist.GetNetCount()):  # Skip net 0 (no net)
-            net_info = netlist.GetNetItem(net_code)
-            if not net_info:
-                continue
+        # Try different methods to get nets based on KiCad version
+        try:
+            # Method 1: Try GetNetlist() (older KiCad)
+            if hasattr(board, 'GetNetlist'):
+                netlist = board.GetNetlist()
+                net_count = netlist.GetNetCount()
+            else:
+                # Method 2: Use GetNetInfo() (newer KiCad)
+                netlist = None
+                net_count = board.GetNetCount()
+        except Exception as e:
+            print(f"Error accessing netlist: {e}")
+            # Method 3: Direct iteration through nets
+            netlist = None
+            net_count = board.GetNetCount()
+        
+        print(f"Found {net_count} nets in board")
+        
+        # Extract nets using appropriate method
+        if netlist:
+            # Use netlist object
+            for net_code in range(1, net_count):  # Skip net 0 (no net)
+                net_info = netlist.GetNetItem(net_code)
+                if not net_info:
+                    continue
+                    
+                net_name = net_info.GetNetname()
+                pins = self._extract_pins_for_net(board, net_code)
                 
-            net_name = net_info.GetNetname()
-            pins = []
-            
-            # Find pads connected to this net
-            for module in board.GetFootprints():
-                for pad in module.Pads():
-                    if pad.GetNetCode() == net_code:
-                        pos = pad.GetPosition()
-                        layer = pad.GetLayer()
-                        pins.append({
-                            'x': int(pos.x),
-                            'y': int(pos.y),
-                            'layer': 0 if layer == pcbnew.F_Cu else 1  # Simplified layer mapping
-                        })
-            
-            if len(pins) >= 2:  # Only include nets with 2+ pins
-                nets.append({
-                    'id': net_code,
-                    'name': net_name,
-                    'pins': pins,
-                    'width_nm': 200000  # Default 0.2mm trace width
-                })
+                if len(pins) >= 2:  # Only include nets with 2+ pins
+                    nets.append({
+                        'id': net_code,
+                        'name': net_name,
+                        'pins': pins,
+                        'width_nm': 200000  # Default 0.2mm trace width
+                    })
+        else:
+            # Direct method using board nets
+            for net_code in range(1, net_count):
+                net_info = board.GetNetInfo().GetNetItem(net_code)
+                if not net_info:
+                    continue
+                    
+                net_name = net_info.GetNetname()
+                pins = self._extract_pins_for_net(board, net_code)
+                
+                if len(pins) >= 2:  # Only include nets with 2+ pins
+                    nets.append({
+                        'id': net_code,
+                        'name': net_name,
+                        'pins': pins,
+                        'width_nm': 200000  # Default 0.2mm trace width
+                    })
         
         return {
             'bounds': {
@@ -211,6 +251,24 @@ Statistics:
             }
         }
     
+    def _extract_pins_for_net(self, board, net_code):
+        """Extract pins for a specific net"""
+        pins = []
+        
+        # Find pads connected to this net
+        for module in board.GetFootprints():
+            for pad in module.Pads():
+                if pad.GetNetCode() == net_code:
+                    pos = pad.GetPosition()
+                    layer = pad.GetLayer()
+                    pins.append({
+                        'x': int(pos.x),
+                        'y': int(pos.y),
+                        'layer': 0 if layer == pcbnew.F_Cu else 1  # Simplified layer mapping
+                    })
+        
+        return pins
+    
     def _import_routes(self, board, results):
         """Import routing results back to the board"""
         if not results.get('nets'):
@@ -225,8 +283,17 @@ Statistics:
                 continue
             
             # Get net info
-            netlist = board.GetNetlist()
-            net_info = netlist.GetNetItem(net_id)
+            try:
+                # Try different methods to get net info
+                if hasattr(board, 'GetNetlist'):
+                    netlist = board.GetNetlist()
+                    net_info = netlist.GetNetItem(net_id)
+                else:
+                    net_info = board.GetNetInfo().GetNetItem(net_id)
+            except Exception as e:
+                print(f"Error getting net info for net {net_id}: {e}")
+                continue
+                
             if not net_info:
                 continue
             
@@ -261,10 +328,11 @@ Statistics:
 class OrthoRouteConfigDialog(wx.Dialog):
     """Configuration dialog for OrthoRoute settings"""
     
-    def __init__(self, parent):
+    def __init__(self, parent, cpu_mode=False):
         super().__init__(parent, title="OrthoRoute GPU Autorouter Configuration",
                         style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
         
+        self.cpu_mode = cpu_mode
         self.config = {
             'grid_pitch_mm': 0.1,
             'max_iterations': 20,
@@ -275,7 +343,7 @@ class OrthoRouteConfigDialog(wx.Dialog):
         }
         
         self._create_ui()
-        self.SetSize((450, 400))
+        self.SetSize((450, 500))  # Made taller to prevent button clipping
         self.CenterOnParent()
     
     def _create_ui(self):
@@ -358,10 +426,13 @@ class OrthoRouteConfigDialog(wx.Dialog):
     
     def _get_gpu_info(self) -> str:
         """Get GPU information for display"""
+        if self.cpu_mode:
+            return "ℹ Running in CPU-only mode\n  CuPy not available for GPU acceleration"
+        
         try:
             import cupy as cp
             device = cp.cuda.Device()
-            mem_info = device.mem_info()
+            mem_info = device.mem_info
             total_mem = mem_info[1] / (1024**3)
             return f"✓ GPU Ready: {device.name}\n  Memory: {total_mem:.1f} GB"
         except ImportError:
