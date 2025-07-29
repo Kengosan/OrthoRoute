@@ -104,51 +104,80 @@ class WaveRouter:
         
     def route_net(self, net: Net) -> bool:
         """Route a single net using wave propagation"""
-        if len(net.pins) < 2:
-            return False
-            
-        # For multi-pin nets, route pin-by-pin
-        route_points = []
-        remaining_pins = net.pins[1:]
-        current = net.pins[0]
-        
-        while remaining_pins:
-            # Find nearest unrouted pin
-            nearest = min(remaining_pins, 
-                        key=lambda p: p.distance_to(current))
-            
-            # Route to nearest pin
-            path = self._route_two_points(current, nearest)
-            if not path:
+        try:
+            if len(net.pins) < 2:
                 return False
                 
-            # Add path to route (skip first point if not first segment)
-            if route_points:
-                path = path[1:]  # Skip first point to avoid duplicates
-            route_points.extend(path)
+            # Validate pin coordinates before routing
+            width, height, layers = self.grid.width, self.grid.height, self.grid.layers
+            valid_pins = []
             
-            # Update for next iteration
-            current = nearest
-            remaining_pins.remove(nearest)
-        
-        # Store route
-        net.route_path = route_points
-        net.success = True
-        net.routed = True
-        net.via_count = sum(1 for i in range(len(route_points)-1) 
-                           if route_points[i].z != route_points[i+1].z)
-        net.total_length = len(route_points)
-        
-        # Update grid usage
-        for point in route_points:
-            self.grid.usage_count[point.z, point.y, point.x] += 1
-            if self.grid.usage_count[point.z, point.y, point.x] > 3:  # Congestion threshold
-                self.grid.availability[point.z, point.y, point.x] = 0
-        
-        return True
+            for pin in net.pins:
+                if (0 <= pin.x < width and 0 <= pin.y < height and 0 <= pin.z < layers):
+                    valid_pins.append(pin)
+                else:
+                    print(f"⚠️ Warning: Pin at ({pin.x}, {pin.y}, {pin.z}) is outside grid bounds ({width}, {height}, {layers})")
+            
+            if len(valid_pins) < 2:
+                print(f"⚠️ Warning: Net {net.name} has fewer than 2 valid pins after bounds check")
+                return False
+                
+            # For multi-pin nets, route pin-by-pin
+            route_points = []
+            remaining_pins = valid_pins[1:]
+            current = valid_pins[0]
+            
+            while remaining_pins:
+                # Find nearest unrouted pin
+                nearest = min(remaining_pins, 
+                            key=lambda p: p.distance_to(current))
+                
+                # Route to nearest pin
+                path = self._route_two_points(current, nearest)
+                if not path:
+                    return False
+                    
+                # Add path to route (skip first point if not first segment)
+                if route_points:
+                    path = path[1:]  # Skip first point to avoid duplicates
+                route_points.extend(path)
+                
+                # Update for next iteration
+                current = nearest
+                remaining_pins.remove(nearest)
+            
+            # Store route
+            net.route_path = route_points
+            net.success = True
+            net.routed = True
+            net.via_count = sum(1 for i in range(len(route_points)-1) 
+                               if route_points[i].z != route_points[i+1].z)
+            net.total_length = len(route_points)
+            
+            # Update grid usage with bounds checking
+            for point in route_points:
+                if (0 <= point.x < width and 0 <= point.y < height and 0 <= point.z < layers):
+                    self.grid.usage_count[point.z, point.y, point.x] += 1
+                    if self.grid.usage_count[point.z, point.y, point.x] > 3:  # Congestion threshold
+                        self.grid.availability[point.z, point.y, point.x] = 0
+            
+            return True
+            
+        except Exception as e:
+            print(f"❌ Error routing net {net.name}: {e}")
+            return False
     
     def _route_two_points(self, start: Point3D, end: Point3D) -> Optional[List[Point3D]]:
         """Route between two points using wave propagation"""
+        # Validate points are within bounds
+        width, height, layers = self.grid.width, self.grid.height, self.grid.layers
+        
+        if (not (0 <= start.x < width and 0 <= start.y < height and 0 <= start.z < layers) or
+            not (0 <= end.x < width and 0 <= end.y < height and 0 <= end.z < layers)):
+            print(f"⚠️ Error: Route points out of bounds: Start({start.x}, {start.y}, {start.z}), End({end.x}, {end.y}, {end.z})")
+            print(f"Grid dimensions: ({width}, {height}, {layers})")
+            return None
+        
         # Reset arrays
         self.distance.fill(0xFFFFFFFF)
         self.parent.fill(-1)
@@ -172,21 +201,28 @@ class WaveRouter:
             grid_size = (len(active_points) + block_size - 1) // block_size
             
             # Run wave propagation kernel
-            self.wave_kernel(
-                (grid_size,),
-                (block_size,),
-                (self.grid.availability,
-                 self.distance,
-                 self.parent,
-                 self.grid.width,
-                 self.grid.height,
-                 self.grid.layers,
-                 active_points,
-                 len(active_points),
-                 target,
-                 self.congestion_factor,
-                 found_target)
-            )
+            try:
+                self.wave_kernel(
+                    (grid_size,),
+                    (block_size,),
+                    (self.grid.availability,
+                     self.distance,
+                     self.parent,
+                     self.grid.width,
+                     self.grid.height,
+                     self.grid.layers,
+                     active_points,
+                     len(active_points),
+                     target,
+                     self.congestion_factor,
+                     found_target)
+                )
+            except Exception as e:
+                print(f"❌ Error running wave propagation kernel: {e}")
+                print(f"Grid size: {self.grid.width}x{self.grid.height}x{self.grid.layers}")
+                print(f"Active points: {len(active_points)}")
+                print(f"Target: ({target[0]}, {target[1]}, {target[2]})")
+                return None
             
             # Check if target found
             if found_target.get():

@@ -6,13 +6,57 @@ import cupy as cp
 import numpy as np
 import time
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any
 
 class OrthoRouteEngine:
     def __init__(self):
         """Initialize the GPU routing engine."""
         print("OrthoRoute GPU Engine initialized on device 0")
+        # Debug info with unique ID to track engine instances
+        import random, time
+        self.engine_id = f"engine_{int(time.time() % 10000)}_{random.randint(1000, 9999)}"
+        print(f"DEBUG: Created engine instance with ID: {self.engine_id}")
+        
         self._print_gpu_info()
+        # Explicitly initialize visualization attributes
+        self.visualizer = None  # Will hold visualization object when enabled
+        self.viz_config = None  # Will hold visualization configuration
+        self.grid = None
+        # Default configuration
+        self.config = {
+            'max_iterations': 3,
+            'via_cost': 10,
+            'conflict_penalty': 50,
+            'max_wave_iterations': 1000,
+            'grid_pitch_mm': 0.1,  # 100 micron grid pitch
+            'max_layers': 2  # Default number of layers
+        }
+        
+    def enable_visualization(self, viz_config):
+        """Enable real-time visualization during routing."""
+        # Make sure engine_id exists
+        if not hasattr(self, 'engine_id'):
+            import random, time
+            self.engine_id = f"engine_{int(time.time() % 10000)}_{random.randint(1000, 9999)}"
+            print(f"DEBUG: Created engine ID: {self.engine_id}")
+        
+        # Make sure visualizer attribute exists
+        if not hasattr(self, 'visualizer'):
+            print("DEBUG: Adding visualizer attribute")
+            self.visualizer = None
+        
+        try:
+            print(f"DEBUG: Engine {self.engine_id} - Enabling visualization")
+        except AttributeError:
+            print("DEBUG: Enabling visualization (engine_id not available)")
+            
+        self.viz_config = viz_config
+        
+        try:
+            print(f"DEBUG: Engine {self.engine_id} - viz_config set: {self.viz_config is not None}")
+        except AttributeError:
+            print(f"DEBUG: viz_config set: {self.viz_config is not None}")
+        # Visualizer will be created after grid is initialized during route_board
         
     def _print_gpu_info(self):
         """Print GPU information."""
@@ -84,11 +128,26 @@ class GPUGrid:
         
     def world_to_grid(self, x_nm: int, y_nm: int) -> Tuple[int, int]:
         """Convert world coordinates (nm) to grid coordinates"""
-        return (int(x_nm / self.pitch_nm), int(y_nm / self.pitch_nm))
+        try:
+            # Handle potential negative values or invalid types
+            if not isinstance(x_nm, (int, float)) or not isinstance(y_nm, (int, float)):
+                print(f"⚠️ Warning: Invalid coordinate types: x={type(x_nm)}, y={type(y_nm)}")
+                return (0, 0)
+                
+            grid_x = int(x_nm / self.pitch_nm)
+            grid_y = int(y_nm / self.pitch_nm)
+            return (grid_x, grid_y)
+        except Exception as e:
+            print(f"⚠️ Error in world_to_grid conversion: {e}")
+            return (0, 0)
         
     def grid_to_world(self, x: int, y: int) -> Tuple[int, int]:
         """Convert grid coordinates to world coordinates (nm)"""
-        return (int(x * self.pitch_nm), int(y * self.pitch_nm))
+        try:
+            return (int(x * self.pitch_nm), int(y * self.pitch_nm))
+        except Exception as e:
+            print(f"⚠️ Error in grid_to_world conversion: {e}")
+            return (0, 0)
         
     def is_valid_point(self, x: int, y: int, z: int) -> bool:
         """Check if a grid point is within bounds"""
@@ -181,17 +240,34 @@ class OrthoRouteEngine:
         """Load board data and initialize grid"""
         try:
             # Extract board bounds
-            bounds = board_data['bounds']
-            width_nm = bounds['width_nm']
-            height_nm = bounds['height_nm']
+            bounds = board_data.get('bounds', {})
+            width_nm = bounds.get('width_nm', 100000000)  # Default 100mm
+            height_nm = bounds.get('height_nm', 100000000)  # Default 100mm
             
             # Calculate grid dimensions
             grid_config = board_data.get('grid', {})
             pitch_nm = grid_config.get('pitch_nm', int(self.config['grid_pitch_mm'] * 1000000))
             layers = bounds.get('layers', self.config['max_layers'])
             
-            grid_width = int(width_nm / pitch_nm) + 1
-            grid_height = int(height_nm / pitch_nm) + 1
+            # Ensure we have valid values
+            if pitch_nm <= 0:
+                print(f"⚠️ Warning: Invalid grid pitch {pitch_nm}nm, using default 100,000nm")
+                pitch_nm = 100000
+                
+            if width_nm <= 0 or height_nm <= 0:
+                print(f"⚠️ Warning: Invalid board dimensions ({width_nm}x{height_nm})nm, using default 100x100mm")
+                width_nm = 100000000
+                height_nm = 100000000
+                
+            if layers <= 0:
+                print(f"⚠️ Warning: Invalid layer count {layers}, using default 2")
+                layers = 2
+            
+            # Calculate grid dimensions with a minimum size and add some margin
+            grid_width = max(int(width_nm / pitch_nm) + 10, 100)
+            grid_height = max(int(height_nm / pitch_nm) + 10, 100)
+            
+            print(f"Creating routing grid: {grid_width}x{grid_height}x{layers} cells at {pitch_nm}nm pitch")
             
             # Initialize grid
             self.grid = GPUGrid(grid_width, grid_height, layers, pitch_nm / 1000000.0)
@@ -208,9 +284,28 @@ class OrthoRouteEngine:
         except KeyError as e:
             print(f"Missing required field in board data: {e}")
             return False
+        except Exception as e:
+            print(f"Error loading board data: {e}")
+            return False
     
     def route_board(self, board_data: Dict) -> Dict:
         """Route board and return results"""
+        # Use safer debug prints to avoid attribute errors
+        try:
+            print(f"DEBUG: Engine {self.engine_id} - Starting route_board")
+        except AttributeError:
+            print("DEBUG: Starting route_board (engine_id not available)")
+            
+        # Ensure engine_id attribute exists
+        if not hasattr(self, 'engine_id'):
+            import random, time
+            self.engine_id = f"engine_{int(time.time() % 10000)}_{random.randint(1000, 9999)}"
+            print(f"DEBUG: Created engine ID: {self.engine_id}")
+            
+        print(f"DEBUG: Engine {self.engine_id} - has viz_config: {hasattr(self, 'viz_config')}")
+        if hasattr(self, 'viz_config'):
+            print(f"DEBUG: Engine {self.engine_id} - viz_config value: {self.viz_config}")
+        
         if not self.load_board_data(board_data):
             return {'success': False, 'error': 'Failed to load board data'}
         
@@ -226,15 +321,51 @@ class OrthoRouteEngine:
         from .wave_router import WaveRouter
         router = WaveRouter(self.grid)
         
+        # Always ensure visualizer attribute exists
+        if not hasattr(self, 'visualizer'):
+            self.visualizer = None
+            
+        # Initialize visualization if enabled
+        print("DEBUG: Before visualization check")
+        try:
+            engine_id = getattr(self, 'engine_id', 'unknown')
+            print(f"DEBUG: Engine {engine_id} - Before visualization check")
+            print(f"DEBUG: Engine {engine_id} - has viz_config: {hasattr(self, 'viz_config')}")
+            
+            if hasattr(self, 'viz_config') and self.viz_config:
+                print(f"DEBUG: Engine {engine_id} - Trying to initialize visualization")
+                try:
+                    # Import at top level to avoid issues
+                    from orthoroute.visualization import RoutingVisualizer
+                    self.visualizer = RoutingVisualizer(self.grid, self.viz_config)
+                    self.visualizer.initialize_display(board_data)
+                    self.visualizer.start()
+                    print(f"DEBUG: Engine {engine_id} - Real-time visualization enabled")
+                except Exception as e:
+                    print(f"DEBUG: Visualization error: {e}")
+                    self.visualizer = None
+        except Exception as e:
+            print(f"DEBUG: Error in visualization setup: {e}")
+            self.visualizer = None
+        
         # Route nets
         successful_nets = []
         failed_nets = []
         
-        for net in nets:
+        for i, net in enumerate(nets):
             if router.route_net(net):
                 successful_nets.append(net)
             else:
                 failed_nets.append(net)
+            
+            # Update visualization every few nets
+            if hasattr(self, 'visualizer') and self.visualizer and i % 5 == 0:
+                try:
+                    self.visualizer.update(successful_nets, failed_nets, 
+                                         progress=i/len(nets))
+                except Exception as e:
+                    print(f"DEBUG: Visualization update error: {e}")
+                    # Continue routing even if visualization fails
         
         # Try to resolve conflicts and reroute failed nets
         if failed_nets:
@@ -247,12 +378,41 @@ class OrthoRouteEngine:
                 for point in net.route_path:
                     self.grid.usage_count[point.z, point.y, point.x] -= 1
             
+            # Update visualization before conflict resolution
+            if hasattr(self, 'visualizer') and self.visualizer:
+                try:
+                    self.visualizer.update(successful_nets, failed_nets, 
+                                        progress=0.8, 
+                                        status="Resolving conflicts...")
+                except Exception as e:
+                    print(f"DEBUG: Visualization update error: {e}")
+                    # Continue routing even if visualization fails
+            
             # Reroute with conflict resolution
             rerouted_nets = resolver.resolve_conflicts(failed_nets, max_iterations)
             successful_nets.extend(rerouted_nets)
+            
+            # Final visualization update
+            if hasattr(self, 'visualizer') and self.visualizer:
+                try:
+                    self.visualizer.update(successful_nets, failed_nets, 
+                                        progress=1.0, 
+                                        status="Routing complete")
+                except Exception as e:
+                    print(f"DEBUG: Visualization update error: {e}")
+                    # Continue routing even if visualization fails
         
         routing_time = time.time() - start_time
         
+        # Stop visualization
+        if hasattr(self, 'visualizer') and self.visualizer:
+            try:
+                # Leave visualization window open for viewing
+                self.visualizer.set_status("Routing complete - Close window to continue")
+            except Exception as e:
+                print(f"DEBUG: Visualization status update error: {e}")
+                # Continue routing even if visualization fails
+            
         # Generate results
         return self._generate_results(successful_nets + failed_nets, routing_time)
     
@@ -261,24 +421,95 @@ class OrthoRouteEngine:
         nets = []
         
         for net_data in nets_data:
-            pins = []
+            valid_pins = []
+            invalid_pins = []
+            
             for pin_data in net_data.get('pins', []):
                 # Convert world coordinates to grid coordinates
                 grid_x, grid_y = self.grid.world_to_grid(pin_data['x'], pin_data['y'])
-                pins.append(Point3D(grid_x, grid_y, pin_data['layer']))
+                
+                # Check if pin is within grid bounds
+                if (0 <= grid_x < self.grid.width and 
+                    0 <= grid_y < self.grid.height and
+                    0 <= pin_data.get('layer', 0) < self.grid.layers):
+                    valid_pins.append(Point3D(grid_x, grid_y, pin_data.get('layer', 0)))
+                else:
+                    # Pin is outside grid bounds
+                    invalid_pins.append((grid_x, grid_y, pin_data.get('layer', 0)))
             
-            if len(pins) >= 2:
+            # Only create net if there are at least 2 valid pins
+            if len(valid_pins) >= 2:
                 net = Net(
                     id=net_data['id'],
                     name=net_data.get('name', f"Net_{net_data['id']}"),
-                    pins=pins,
+                    pins=valid_pins,
                     width_nm=net_data.get('width_nm', 200000)
                 )
                 nets.append(net)
+            elif invalid_pins:
+                # Log the issue
+                net_id = net_data.get('id', 0)
+                net_name = net_data.get('name', f"Net_{net_id}")
+                print(f"⚠️ Warning: Net {net_name} has pins outside grid bounds:")
+                for x, y, layer in invalid_pins:
+                    print(f"   Pin at ({x}, {y}, {layer}) - Grid size is ({self.grid.width}, {self.grid.height}, {self.grid.layers})")
         
         # Sort by priority
         nets.sort(key=lambda n: n.priority)
         return nets
+    
+    def route(self, board_data: Dict, config: Dict = None) -> Dict:
+        """
+        Route the board with the given config.
+        This is an alias for route_board to ensure compatibility with the KiCad plugin.
+        """
+        # Handle different board data formats (orthoroute_plugin.py vs orthoroute_kicad.py)
+        if 'netlist' in board_data and not 'nets' in board_data:
+            # Convert from orthoroute_plugin.py format to gpu_engine format
+            netlist = board_data['netlist']
+            nets = []
+            
+            for net_name, pins in netlist.items():
+                if len(pins) < 2:  # Skip nets with less than 2 pins
+                    continue
+                    
+                net = {
+                    'id': len(nets) + 1,  # Generate sequential IDs
+                    'name': net_name,
+                    'pins': pins,
+                    'width_nm': 200000  # Default 0.2mm
+                }
+                nets.append(net)
+                
+            # Replace netlist with nets array
+            board_data['nets'] = nets
+        
+        # Merge configuration if provided
+        if config:
+            # Update config with user settings
+            if 'grid' in config:
+                board_data['grid'] = config['grid']
+            if 'routing' in config:
+                board_data['routing'] = config['routing']
+            if 'options' in config:
+                board_data['options'] = config['options']
+        
+        # Ensure required fields exist
+        if 'bounds' not in board_data:
+            board_data['bounds'] = {
+                'width_nm': int(board_data.get('width', 100000000)),  # Convert to nm
+                'height_nm': int(board_data.get('height', 100000000)),
+                'layers': 2
+            }
+            
+        if 'grid' not in board_data:
+            board_data['grid'] = {
+                'pitch_nm': 100000,  # 0.1mm grid
+                'via_size_nm': 200000  # 0.2mm vias
+            }
+        
+        # Call the main routing method
+        return self.route_board(board_data)
     
     def _generate_results(self, nets: List[Net], routing_time: float) -> Dict:
         """Generate routing results"""

@@ -8,7 +8,7 @@ including grid state, net routing, congestion analysis, and performance metrics.
 
 import cupy as cp
 import numpy as np
-from typing import List, Dict, Tuple, Optional, Callable
+from typing import List, Dict, Tuple, Optional, Callable, Any
 import time
 import threading
 from dataclasses import dataclass
@@ -16,14 +16,16 @@ from .grid_manager import Point3D, Net, GPUGrid
 from .design_rules import DesignRuleViolation
 
 # Optional dependencies for visualization
+# Import matplotlib at module level to ensure plt is available throughout
+import matplotlib.pyplot as plt
 try:
-    import matplotlib.pyplot as plt
     import matplotlib.animation as animation
     from matplotlib.colors import ListedColormap, BoundaryNorm
     from matplotlib.patches import Rectangle, Circle
     MATPLOTLIB_AVAILABLE = True
 except ImportError:
     MATPLOTLIB_AVAILABLE = False
+    plt = None
 
 try:
     import tkinter as tk
@@ -129,7 +131,266 @@ class RoutingVisualizer:
         
         # Threading for non-blocking updates
         self.update_thread = None
-        self.stop_event = threading.Event()
+        self.stop_event = None
+        self.status_text = "Initializing..."
+        
+    def initialize_display(self, board_data: Dict):
+        """Initialize the visualization display with board data"""
+        if not MATPLOTLIB_AVAILABLE:
+            print("Warning: Matplotlib not available for visualization")
+            return False
+            
+        try:
+            # Initialize thread control
+            self.update_thread = None
+            self.stop_event = threading.Event()
+            
+            # Enable interactive mode for matplotlib
+            plt.ion()
+            
+            # Just use whatever backend is available
+            plt.ion()  # Turn on interactive mode
+                
+            # Initialize figure and axes
+            self.fig = plt.figure(figsize=(10, 8))
+            
+            # Set window title if possible
+            if hasattr(self.fig.canvas, 'manager') and self.fig.canvas.manager:
+                try:
+                    self.fig.canvas.manager.set_window_title("OrthoRoute GPU Routing Visualization")
+                except Exception as e:
+                    print(f"Failed to set window title: {e}")
+            
+            # Create grid subplot
+            self.ax = self.fig.add_subplot(111)
+            self.ax.set_title("OrthoRoute Routing Progress")
+            
+            # Get board outline and components
+            self.board_outline = board_data.get('board_outline', [])
+            self.components = board_data.get('components', [])
+            
+            # Extract net data - ensure it's a list of dictionaries
+            nets = board_data.get('nets', [])
+            if isinstance(nets, list):
+                self.routing_stats['nets_total'] = len(nets)
+                
+                # Initialize colors for nets
+                colors = plt.cm.tab20.colors
+                for i, net in enumerate(nets):
+                    if isinstance(net, dict) and 'id' in net:
+                        color_idx = i % len(colors)
+                        self.net_colors[net['id']] = colors[color_idx]
+            
+            # Draw initial state
+            self._draw_board_outline()
+            self._draw_components()
+            self._draw_grid_state()
+            
+            # Add status text
+            self.status_text_obj = self.ax.text(
+                0.02, 0.02, "Initializing...", 
+                transform=self.ax.transAxes,
+                color='white', backgroundcolor='black'
+            )
+            
+            return True
+        except Exception as e:
+            print(f"Error initializing visualization: {e}")
+            return False
+    
+    def start(self):
+        """Start the visualization in a background thread"""
+        if not hasattr(self, 'fig'):
+            print("Visualization not initialized. Call initialize_display first.")
+            return False
+            
+        try:
+            import threading
+            import matplotlib.pyplot as plt
+            import matplotlib
+            
+            print(f"DEBUG: Using matplotlib backend: {matplotlib.get_backend()}")
+            
+            # Force figure to be visible
+            self.fig.canvas.manager.show()
+            self.fig.canvas.draw_idle()
+            
+            # Start update thread
+            self.stop_event = threading.Event()
+            self.update_thread = threading.Thread(target=self._update_display_loop)
+            self.update_thread.daemon = True
+            self.update_thread.start()
+            self.active = True
+            
+            # Show the figure non-blocking
+            plt.ion()  # Turn on interactive mode
+            plt.show(block=False)
+            plt.pause(0.1)  # Pause to let the window appear
+            
+            print("DEBUG: Visualization window should be visible now")
+            return True
+        except Exception as e:
+            print(f"Error starting visualization: {e}")
+            import traceback
+            print(traceback.format_exc())
+            self.active = False
+            return False
+    
+    def update(self, successful_nets, failed_nets, progress=0.0, status=None):
+        """Update the visualization with current routing progress"""
+        if not self.active or not hasattr(self, 'ax'):
+            return
+            
+        try:
+            import matplotlib.pyplot as plt
+            
+            # Update status
+            if status:
+                self.set_status(status)
+            else:
+                self.set_status(f"Routing progress: {progress*100:.1f}%")
+            
+            # Clear previous drawings
+            self.ax.cla()
+            
+            # Draw updated state
+            self._draw_board_outline()
+            self._draw_components()
+            
+            # Draw completed nets
+            for net in successful_nets:
+                if hasattr(net, 'route_path') and net.route_path:
+                    net_color = 'green'
+                    if hasattr(net, 'id') and net.id in self.net_colors:
+                        net_color = self.net_colors[net.id]
+                    self._draw_net(net, color=net_color)
+            
+            # Draw failed nets
+            for net in failed_nets:
+                if hasattr(net, 'pins') and net.pins:
+                    self._draw_net_pins(net, color='red')
+            
+            # Update statistics
+            self.routing_stats['nets_completed'] = len(successful_nets)
+            
+            # Update status text
+            self.status_text_obj = self.ax.text(
+                0.02, 0.02, self.status_text,
+                transform=self.ax.transAxes,
+                color='white', backgroundcolor='black'
+            )
+            
+            # Force redraw
+            plt.draw()
+            plt.pause(0.001)  # Small pause to allow GUI to update
+            
+        except Exception as e:
+            print(f"Visualization update error: {e}")
+            # Don't fail the routing just because visualization has issues
+    
+    def _update_display_loop(self):
+        """Background thread to update the display"""
+        try:
+            import matplotlib.pyplot as plt
+            print("DEBUG: Starting visualization update loop")
+            
+            if not hasattr(self, 'stop_event') or self.stop_event is None:
+                self.stop_event = threading.Event()
+            
+            # Force figure to be visible at startup
+            plt.figure(self.fig.number)
+            plt.draw()
+            plt.pause(0.5)  # Longer initial pause to ensure window appears
+            
+            print("DEBUG: Visualization window should now be visible")
+                
+            while not self.stop_event.is_set():
+                try:
+                    # Make sure figure is still active
+                    if plt.fignum_exists(self.fig.number):
+                        # Refresh the figure to keep it responsive
+                        plt.figure(self.fig.number)
+                        plt.draw()
+                        plt.pause(0.1)  # Allow matplotlib to update
+                    else:
+                        print("DEBUG: Figure window was closed")
+                        break
+                except Exception as e:
+                    print(f"Display update error: {e}")
+                    time.sleep(0.1)  # Fallback if plt.pause fails
+                
+            # Close the figure when done
+            if hasattr(self, 'fig'):
+                try:
+                    plt.close(self.fig)
+                except Exception as e:
+                    print(f"Error closing figure: {e}")
+            
+            print("DEBUG: Visualization update loop ended")
+        except Exception as e:
+            print(f"Visualization thread error: {e}")
+            self.active = False
+    
+    def set_status(self, text):
+        """Update the status text"""
+        self.status_text = text
+        
+    def stop(self):
+        """Stop the visualization"""
+        if self.stop_event:
+            self.stop_event.set()
+            if self.update_thread:
+                self.update_thread.join(timeout=1.0)
+        self.active = False
+        
+    def _draw_board_outline(self):
+        """Draw the board outline"""
+        # If no outline, create a default one
+        if not self.board_outline:
+            w, h = self.grid.width, self.grid.height
+            self.ax.add_patch(plt.Rectangle((0, 0), w, h, 
+                                           fill=False, edgecolor='white', linewidth=2))
+            self.ax.set_xlim(0, w)
+            self.ax.set_ylim(0, h)
+        else:
+            # TODO: Draw actual board outline
+            pass
+    
+    def _draw_components(self):
+        """Draw components on the board"""
+        for comp in self.components:
+            # TODO: Draw component outlines
+            pass
+    
+    def _draw_grid_state(self):
+        """Draw the current grid state"""
+        # This would visualize obstacles, via restrictions, etc.
+        pass
+        
+    def _draw_net(self, net, color='green'):
+        """Draw a routed net"""
+        if not hasattr(net, 'route_path') or not net.route_path:
+            return
+        
+        # Extract coordinates
+        points = [(p.x, p.y) for p in net.route_path]
+        if len(points) < 2:
+            return
+            
+        # Draw path segments
+        xs, ys = zip(*points)
+        self.ax.plot(xs, ys, color=color, linewidth=2, alpha=0.8)
+        
+        # Draw pins
+        self._draw_net_pins(net, color)
+        
+    def _draw_net_pins(self, net, color='blue'):
+        """Draw pins for a net"""
+        if not hasattr(net, 'pins') or not net.pins:
+            return
+            
+        for pin in net.pins:
+            self.ax.plot(pin.x, pin.y, 'o', color=color, markersize=5)
         
         # Initialize backend
         self._initialize_backend()
@@ -266,13 +527,14 @@ class RoutingVisualizer:
         """Update routing progress information"""
         completed_nets = sum(1 for net in nets if net.routed)
         
-        self.routing_stats.update({
-            'nets_completed': completed_nets,
-            'nets_total': len(nets),
-            'current_iteration': iteration,
-            'routing_time': routing_time,
-            'nets_per_second': completed_nets / routing_time if routing_time > 0 else 0
-        })
+        if hasattr(self, 'routing_stats') and isinstance(self.routing_stats, dict):
+            self.routing_stats.update({
+                'nets_completed': completed_nets,
+                'nets_total': len(nets),
+                'current_iteration': iteration,
+                'routing_time': routing_time,
+                'nets_per_second': completed_nets / routing_time if routing_time > 0 else 0
+            })
         
         # Update net colors and paths
         for net in nets:

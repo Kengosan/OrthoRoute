@@ -2,10 +2,14 @@ README.md
 setup.py
 kicad_plugin/__init__.py
 kicad_plugin/board_export.py
+kicad_plugin/minimal_plugin.py
 kicad_plugin/orthoroute_cli.py
 kicad_plugin/orthoroute_kicad.py
-kicad_plugin/plugin_init.py
+kicad_plugin/orthoroute_plugin.py
+kicad_plugin/plugin.py
+kicad_plugin/register_plugin.py
 kicad_plugin/route_import.py
+kicad_plugin/test_plugin.py
 kicad_plugin/ui_dialogs.py
 orthoroute/__init__.py
 orthoroute/design_rules.py
@@ -26,6 +30,8 @@ tests/test_gpu_engine.py
 tests/test_gpu_engine_mock.py
 tests/test_gpu_router.py
 tests/test_ortho.py
+tests/test_plugin_data.py
+tests/test_plugin_registration.py
 tests/test_route.py
 tests/test_router.py
 tests/test_utils.py

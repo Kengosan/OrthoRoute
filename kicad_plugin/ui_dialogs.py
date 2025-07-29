@@ -7,15 +7,25 @@ for the OrthoRoute KiCad plugin, including configuration, progress tracking,
 results display, and error handling.
 """
 
-import wx
-import wx.lib.newevent
-import threading
-import time
-import json
-import os
-from typing import Dict, List, Optional, Callable
-from dataclasses import dataclass
-from enum import Enum
+try:
+    import wx
+    import wx.lib.newevent
+    import threading
+    import time
+    import json
+    import os
+    import sys
+    from typing import Dict, List, Optional, Callable
+    from dataclasses import dataclass
+    from enum import Enum
+    
+    # Debug info at module level
+    _debug_info = f"ui_dialogs.py loaded from {__file__}\nPython path: {sys.path}"
+    wx.MessageBox(_debug_info, "UI Dialogs Debug", wx.OK)
+except Exception as e:
+    import sys
+    sys.stderr.write(f"Error loading ui_dialogs.py: {str(e)}\n")
+    raise
 
 # Custom events for threading communication
 UpdateProgressEvent, EVT_UPDATE_PROGRESS = wx.lib.newevent.NewEvent()
@@ -124,12 +134,17 @@ class OrthoRouteConfigDialog(wx.Dialog):
         # Grid pitch
         pitch_sizer = wx.FlexGridSizer(2, 2, 5, 10)
         pitch_sizer.Add(wx.StaticText(panel, label="Grid Pitch (mm):"), 0, wx.ALIGN_CENTER_VERTICAL)
-        self.pitch_ctrl = wx.SpinCtrlDouble(panel, value=0.1, min=0.025, max=0.5, inc=0.025)
+        self.pitch_ctrl = wx.SpinCtrlDouble(panel)
+        self.pitch_ctrl.SetValue(0.1)
+        self.pitch_ctrl.SetRange(0.025, 0.5)
+        self.pitch_ctrl.SetIncrement(0.025)
         self.pitch_ctrl.SetDigits(3)
         pitch_sizer.Add(self.pitch_ctrl, 1, wx.EXPAND)
         
         pitch_sizer.Add(wx.StaticText(panel, label="Routing Layers:"), 0, wx.ALIGN_CENTER_VERTICAL)
-        self.layers_ctrl = wx.SpinCtrl(panel, value=4, min=2, max=32)
+        self.layers_ctrl = wx.SpinCtrl(panel)
+        self.layers_ctrl.SetValue(4)
+        self.layers_ctrl.SetRange(2, 32)
         pitch_sizer.Add(self.layers_ctrl, 1, wx.EXPAND)
         
         grid_sizer.Add(pitch_sizer, 0, wx.EXPAND | wx.ALL, 5)
@@ -147,15 +162,21 @@ class OrthoRouteConfigDialog(wx.Dialog):
         routing_grid = wx.FlexGridSizer(3, 2, 5, 10)
         
         routing_grid.Add(wx.StaticText(panel, label="Max Iterations:"), 0, wx.ALIGN_CENTER_VERTICAL)
-        self.iterations_ctrl = wx.SpinCtrl(panel, value=20, min=5, max=100)
+        self.iterations_ctrl = wx.SpinCtrl(panel)
+        self.iterations_ctrl.SetValue(20)
+        self.iterations_ctrl.SetRange(5, 100)
         routing_grid.Add(self.iterations_ctrl, 1, wx.EXPAND)
         
         routing_grid.Add(wx.StaticText(panel, label="Batch Size:"), 0, wx.ALIGN_CENTER_VERTICAL)
-        self.batch_ctrl = wx.SpinCtrl(panel, value=256, min=64, max=2048)
+        self.batch_ctrl = wx.SpinCtrl(panel)
+        self.batch_ctrl.SetValue(256)
+        self.batch_ctrl.SetRange(64, 2048)
         routing_grid.Add(self.batch_ctrl, 1, wx.EXPAND)
         
         routing_grid.Add(wx.StaticText(panel, label="Tile Size:"), 0, wx.ALIGN_CENTER_VERTICAL)
-        self.tile_ctrl = wx.SpinCtrl(panel, value=64, min=32, max=256)
+        self.tile_ctrl = wx.SpinCtrl(panel)
+        self.tile_ctrl.SetValue(64)
+        self.tile_ctrl.SetRange(32, 256)
         routing_grid.Add(self.tile_ctrl, 1, wx.EXPAND)
         
         routing_sizer.Add(routing_grid, 0, wx.EXPAND | wx.ALL, 5)
@@ -187,7 +208,10 @@ class OrthoRouteConfigDialog(wx.Dialog):
         algo_grid = wx.FlexGridSizer(4, 2, 5, 10)
         
         algo_grid.Add(wx.StaticText(panel, label="Congestion Factor:"), 0, wx.ALIGN_CENTER_VERTICAL)
-        self.congestion_ctrl = wx.SpinCtrlDouble(panel, value=1.5, min=1.1, max=3.0, inc=0.1)
+        self.congestion_ctrl = wx.SpinCtrlDouble(panel)
+        self.congestion_ctrl.SetValue(1.5)
+        self.congestion_ctrl.SetRange(1.1, 3.0)
+        self.congestion_ctrl.SetIncrement(0.1)
         self.congestion_ctrl.SetDigits(1)
         algo_grid.Add(self.congestion_ctrl, 1, wx.EXPAND)
         
@@ -213,11 +237,15 @@ class OrthoRouteConfigDialog(wx.Dialog):
         gpu_grid = wx.FlexGridSizer(2, 2, 5, 10)
         
         gpu_grid.Add(wx.StaticText(panel, label="GPU Device ID:"), 0, wx.ALIGN_CENTER_VERTICAL)
-        self.gpu_id_ctrl = wx.SpinCtrl(panel, value=0, min=0, max=7)
+        self.gpu_id_ctrl = wx.SpinCtrl(panel)
+        self.gpu_id_ctrl.SetValue(0)
+        self.gpu_id_ctrl.SetRange(0, 7)
         gpu_grid.Add(self.gpu_id_ctrl, 1, wx.EXPAND)
         
         gpu_grid.Add(wx.StaticText(panel, label="Memory Limit (GB):"), 0, wx.ALIGN_CENTER_VERTICAL)
-        self.memory_limit_ctrl = wx.SpinCtrl(panel, value=0, min=0, max=64)  # 0 = auto
+        self.memory_limit_ctrl = wx.SpinCtrl(panel)
+        self.memory_limit_ctrl.SetValue(0)
+        self.memory_limit_ctrl.SetRange(0, 64)  # 0 = auto
         gpu_grid.Add(self.memory_limit_ctrl, 1, wx.EXPAND)
         
         gpu_sizer.Add(gpu_grid, 0, wx.EXPAND | wx.ALL, 5)

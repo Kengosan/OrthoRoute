@@ -5,6 +5,14 @@ import json
 import tempfile
 import os
 from typing import Dict, List
+import ui_dialogs
+import board_export
+import route_import
+# Import moved inside _route_board_gpu to avoid import errors if CuPy not available
+
+OrthoRouteConfigDialog = ui_dialogs.OrthoRouteConfigDialog
+BoardExporter = board_export.BoardExporter
+RouteImporter = route_import.RouteImporter
 
 class OrthoRouteKiCadPlugin(pcbnew.ActionPlugin):
     """KiCad plugin for OrthoRoute GPU autorouter"""
@@ -81,13 +89,8 @@ class OrthoRouteKiCadPlugin(pcbnew.ActionPlugin):
         try:
             # Import here to avoid import errors if CuPy not available
             import orthoroute.gpu_engine as gpu_engine
-            import board_export
-            import route_import
-            
-            # Create instances
-            engine = gpu_engine.OrthoRouteEngine()
-            exporter = board_export.BoardExporter(board)
-            importer = route_import.RouteImporter(board)
+            from . import board_export
+            from . import route_import
             
             # Step 1: Export board data
             progress.Update(10, "Exporting board data...")
@@ -100,7 +103,71 @@ class OrthoRouteKiCadPlugin(pcbnew.ActionPlugin):
             
             # Step 2: Initialize GPU engine
             progress.Update(30, "Initializing GPU engine...")
-            engine = OrthoRouteEngine()
+            # For debugging - make sure we only create one engine instance
+            print("DEBUG KICAD: Creating OrthoRouteEngine instance")
+            
+            # Import entire module to avoid namespace issues
+            import orthoroute.gpu_engine
+            # Use the module's class (should have all attributes)
+            engine = orthoroute.gpu_engine.OrthoRouteEngine()
+            
+            # Use a try-except to avoid attribute errors in debug messages
+            try:
+                print(f"DEBUG KICAD: Engine created with ID: {engine.engine_id}")
+            except AttributeError:
+                print("DEBUG KICAD: Engine created (no ID attribute available)")
+            
+            # Setup visualization if enabled
+            if config.get('show_visualization', False):
+                print("DEBUG KICAD: Visualization enabled in config")
+                try:
+                    print("DEBUG KICAD: Importing visualization modules")
+                    from orthoroute.visualization import RoutingVisualizer, VisualizationConfig
+                    
+                    print("DEBUG KICAD: Creating VisualizationConfig")
+                    viz_config = VisualizationConfig(
+                        backend="matplotlib",
+                        update_interval=0.25,
+                        show_grid=True,
+                        show_obstacles=True,
+                        show_nets=True
+                    )
+                    
+                    # Enable visualization on engine
+                    print("DEBUG KICAD: Calling engine.enable_visualization()")
+                    
+                    # Make sure the visualizer attribute exists
+                    if not hasattr(engine, 'visualizer'):
+                        print("DEBUG KICAD: Adding visualizer attribute to engine")
+                        engine.visualizer = None
+                    
+                    # Make sure viz_config attribute exists 
+                    if hasattr(engine, 'enable_visualization'):
+                        try:
+                            engine.enable_visualization(viz_config)
+                            print("DEBUG KICAD: Visualization successfully enabled")
+                        except Exception as e:
+                            print(f"DEBUG KICAD: Error enabling visualization: {e}")
+                            # Fall back solution - add attribute directly
+                            engine.viz_config = viz_config
+                            print("DEBUG KICAD: viz_config attribute manually added")
+                    else:
+                        print("DEBUG KICAD: ERROR - engine has no enable_visualization method!")
+                        # Fall back solution - add attribute directly
+                        engine.viz_config = viz_config
+                        print("DEBUG KICAD: viz_config attribute manually added")
+                except ImportError as e:
+                    print(f"DEBUG KICAD: ImportError: {e}")
+                    wx.MessageBox(
+                        f"Visualization dependencies not available: {e}\nInstall matplotlib for visualization.",
+                        "Visualization Warning", wx.OK | wx.ICON_WARNING
+                    )
+                except Exception as e:
+                    print(f"DEBUG KICAD: Visualization setup error: {e}")
+                    wx.MessageBox(
+                        f"Error setting up visualization: {e}",
+                        "Visualization Error", wx.OK | wx.ICON_WARNING
+                    )
             
             # Step 3: Route on GPU
             progress.Update(50, f"Routing {len(board_data['nets'])} nets on GPU...")
@@ -161,7 +228,10 @@ class OrthoRouteConfigDialog(wx.Dialog):
         # Grid pitch
         pitch_sizer = wx.BoxSizer(wx.HORIZONTAL)
         pitch_sizer.Add(wx.StaticText(panel, label="Grid Pitch (mm):"), 0, wx.CENTER | wx.RIGHT, 5)
-        self.pitch_ctrl = wx.SpinCtrlDouble(panel, value=0.1, min=0.05, max=0.5, inc=0.05)
+        self.pitch_ctrl = wx.SpinCtrlDouble(panel)
+        self.pitch_ctrl.SetValue(0.1)
+        self.pitch_ctrl.SetRange(0.05, 0.5)
+        self.pitch_ctrl.SetIncrement(0.05)
         self.pitch_ctrl.SetDigits(2)
         pitch_sizer.Add(self.pitch_ctrl, 1, wx.EXPAND)
         grid_sizer.Add(pitch_sizer, 0, wx.EXPAND | wx.ALL, 5)
@@ -169,7 +239,10 @@ class OrthoRouteConfigDialog(wx.Dialog):
         # Via size
         via_sizer = wx.BoxSizer(wx.HORIZONTAL)
         via_sizer.Add(wx.StaticText(panel, label="Via Size (mm):"), 0, wx.CENTER | wx.RIGHT, 5)
-        self.via_ctrl = wx.SpinCtrlDouble(panel, value=0.2, min=0.1, max=1.0, inc=0.1)
+        self.via_ctrl = wx.SpinCtrlDouble(panel)
+        self.via_ctrl.SetValue(0.2)
+        self.via_ctrl.SetRange(0.1, 1.0)
+        self.via_ctrl.SetIncrement(0.1)
         self.via_ctrl.SetDigits(2)
         via_sizer.Add(self.via_ctrl, 1, wx.EXPAND)
         grid_sizer.Add(via_sizer, 0, wx.EXPAND | wx.ALL, 5)
@@ -183,7 +256,10 @@ class OrthoRouteConfigDialog(wx.Dialog):
         # Trace width
         width_sizer = wx.BoxSizer(wx.HORIZONTAL)
         width_sizer.Add(wx.StaticText(panel, label="Trace Width (mm):"), 0, wx.CENTER | wx.RIGHT, 5)
-        self.width_ctrl = wx.SpinCtrlDouble(panel, value=0.2, min=0.1, max=1.0, inc=0.1)
+        self.width_ctrl = wx.SpinCtrlDouble(panel)
+        self.width_ctrl.SetValue(0.2)
+        self.width_ctrl.SetRange(0.1, 1.0)
+        self.width_ctrl.SetIncrement(0.1)
         self.width_ctrl.SetDigits(2)
         width_sizer.Add(self.width_ctrl, 1, wx.EXPAND)
         routing_sizer.Add(width_sizer, 0, wx.EXPAND | wx.ALL, 5)
@@ -191,7 +267,10 @@ class OrthoRouteConfigDialog(wx.Dialog):
         # Congestion factor
         cong_sizer = wx.BoxSizer(wx.HORIZONTAL)
         cong_sizer.Add(wx.StaticText(panel, label="Congestion Factor:"), 0, wx.CENTER | wx.RIGHT, 5)
-        self.cong_ctrl = wx.SpinCtrlDouble(panel, value=0.5, min=0.1, max=2.0, inc=0.1)
+        self.cong_ctrl = wx.SpinCtrlDouble(panel)
+        self.cong_ctrl.SetValue(0.5)
+        self.cong_ctrl.SetRange(0.1, 2.0)
+        self.cong_ctrl.SetIncrement(0.1)
         self.cong_ctrl.SetDigits(2)
         cong_sizer.Add(self.cong_ctrl, 1, wx.EXPAND)
         routing_sizer.Add(cong_sizer, 0, wx.EXPAND | wx.ALL, 5)
@@ -199,7 +278,9 @@ class OrthoRouteConfigDialog(wx.Dialog):
         # Max iterations
         iter_sizer = wx.BoxSizer(wx.HORIZONTAL)
         iter_sizer.Add(wx.StaticText(panel, label="Max Iterations:"), 0, wx.CENTER | wx.RIGHT, 5)
-        self.iter_ctrl = wx.SpinCtrl(panel, value=1000, min=100, max=10000)
+        self.iter_ctrl = wx.SpinCtrl(panel)
+        self.iter_ctrl.SetValue(1000)
+        self.iter_ctrl.SetRange(100, 10000)
         iter_sizer.Add(self.iter_ctrl, 1, wx.EXPAND)
         routing_sizer.Add(iter_sizer, 0, wx.EXPAND | wx.ALL, 5)
         
@@ -237,3 +318,6 @@ class OrthoRouteConfigDialog(wx.Dialog):
                 'include_edge_keepouts': True
             }
         }
+
+# Register the plugin with KiCad
+OrthoRoutePlugin = OrthoRouteKiCadPlugin()

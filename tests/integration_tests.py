@@ -226,6 +226,8 @@ class TestDataFlowIntegration:
                     assert routed_net['id'] == 1
                     assert routed_net['name'] == "TEST_NET_1"
                     assert 'path' in routed_net
+        except Exception as e:
+            pytest.fail(f"Engine to results data flow test failed: {e}")
     
     @pytest.mark.skipif(not MODULES_AVAILABLE, reason="Core modules not available")
     def test_results_to_json_data_flow(self):

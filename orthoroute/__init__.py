@@ -20,10 +20,11 @@ try:
     test_array = cp.array([1, 2, 3])
     _CUPY_AVAILABLE = True
     
-    # Import components
+    # Import components - explicitly use relative imports
     from .gpu_engine import OrthoRouteEngine, GPUGrid, Point3D, Net
     from .wave_router import WaveRouter
-    __all__ = ['OrthoRouteEngine', 'GPUGrid', 'Point3D', 'Net', 'WaveRouter']
+    # Define what should be available when importing from the package
+    __all__ = ['OrthoRouteEngine', 'GPUGrid', 'Point3D', 'Net', 'WaveRouter', 'gpu_engine']
     _CUPY_AVAILABLE = True
 except ImportError as e:
     _CUPY_ERROR = f"CuPy not available: {e}"

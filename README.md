@@ -1,13 +1,6 @@
-<div style="display: flex; align-items: start; gap: 2em; margin-bottom: 2em;">
-<center>
-<img src="/Assets/icon200.png" width="200" style="margin: 0"/>
-</center>
-<div>
+![Repo logo](/Assets/icon200.png)
 
-<h1>OrthoRoute: GPU-Accelerated PCB Autorouter</h1>
-</div>
-</div>
-
+# OrthoRoute: GPU-Accelerated PCB Autorouter
 
 **OrthoRoute** is a GPU-accelerated PCB autorouter, designed for massively parallel routing of complex circuit boards. Unlike traditional CPU-based autorouters that process nets sequentially, OrthoRoute leverages thousands of CUDA cores to route nets simultaneously using modern GPU compute.
 
@@ -28,6 +21,10 @@
 - **Rapid development** - NumPy-like syntax for GPU operations
 - **Memory management** - Automatic GPU memory handling
 - **JIT kernels** - Custom CUDA kernels when needed via RawKernel
+
+## Installation
+
+See [INSTALL.md](INSTALL.md) for detailed installation instructions for the KiCad plugin.
 - **Deployment simplicity** - Single Python script, no build system
 
 ## System Architecture
@@ -52,32 +49,40 @@
 
 ### Installation
 
-1. **Install OrthoRoute Package:**
-```bash
-# Clone repository
-git clone https://github.com/bbenchoff/OrthoRoute.git
-cd OrthoRoute
+**Automatic Installation (Recommended)**
+1. Right-click on `install_windows.ps1` and select "Run with PowerShell as administrator"
+2. Wait for the installation to complete
+3. Restart KiCad
 
-# Install package
-pip install .
-```
+**Manual Installation**
+1. First ensure you have Python installed:
+   - KiCad 9.0: Located at `C:\Program Files\KiCad\9.0\bin\python.exe`
+   - KiCad 7.0: Located at `C:\Program Files\KiCad\7.0\bin\python.exe`
 
-2. **Install GPU Dependencies:**
-```bash
-# For CUDA 12.x:
-pip install cupy-cuda12x
-
-# For CUDA 11.x:
-pip install cupy-cuda11x
-```
-
-3. **Install KiCad Plugin:**
-
-Windows:
+2. Install CUDA dependencies in KiCad's Python:
 ```powershell
-$PLUGIN_DIR="$env:APPDATA\kicad\7.0\3rdparty\plugins\OrthoRoute"
-mkdir -p $PLUGIN_DIR
-cp -r kicad_plugin\* $PLUGIN_DIR
+# Use KiCad 9.0's Python
+$KICAD_PYTHON="C:\Program Files\KiCad\9.0\bin\python.exe"
+
+# Install required packages
+& $KICAD_PYTHON -m pip install --upgrade pip
+& $KICAD_PYTHON -m pip install cupy-cuda12x  # For CUDA 12.x
+& $KICAD_PYTHON -m pip install numpy scipy networkx
+```
+
+3. Install OrthoRoute package:
+```powershell
+# Navigate to OrthoRoute directory
+cd path\to\OrthoRoute
+& $KICAD_PYTHON -m pip install -e .
+```
+
+4. Install the plugin:
+```powershell
+# For KiCad 9.0
+$PLUGIN_DIR="$env:USERPROFILE\Documents\KiCad\9.0\scripting\plugins\OrthoRoute"
+New-Item -ItemType Directory -Force -Path $PLUGIN_DIR
+Copy-Item "kicad_plugin\*" -Destination $PLUGIN_DIR -Recurse -Force
 ```
 
 Linux:
@@ -425,16 +430,34 @@ cp -r kicad_plugin/* "$PLUGIN_DIR"
 ```
 
 #### Using OrthoRoute in KiCad
-1. Open your PCB in KiCad PCB Editor
-2. Go to **Tools > External Plugins > OrthoRoute GPU Autorouter**
-3. In the plugin dialog:
-   - Set your desired routing grid (default 0.1mm)
-   - Choose number of layers to route on
-   - Select nets to route (or use "Route All")
-   - Configure design rules (trace width, clearance)
-4. Click "Start Routing"
-5. Monitor progress in the status bar
-6. Review results - routed traces will be added to your board
+1. Start KiCad and open your PCB in PCB Editor
+2. Before routing:
+   - Set your board outline
+   - Place all components
+   - Define net classes and design rules
+   - (Optional) Clear existing routes: **Tools > Global Delete > Tracks**
+
+3. Start the autorouter:
+   - Go to **Tools > External Plugins**
+   - Look for **OrthoRoute GPU Autorouter**
+   - If not visible, check **Tools > Plugin and Content Manager**
+
+4. Configure routing settings:
+   - Grid Size: Start with 0.1mm (adjust for complexity)
+   - Layer Selection: Choose which layers to route on
+   - Net Selection: Select specific nets or "Route All"
+   - Design Rules: Set trace width and clearance
+
+5. Start routing:
+   - Click "Start Routing" button
+   - Watch progress in the status bar
+   - GPU usage is normal during routing
+
+6. After routing:
+   - Review the routed traces
+   - Run DRC to check for violations
+   - Manually touch up any problem areas
+   - Save your board
 
 #### Tips for Best Results
 - Clear any existing routes first (**Tools > Global Delete > Tracks**)

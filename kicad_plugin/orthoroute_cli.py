@@ -205,7 +205,7 @@ def run_performance_benchmark():
     
     test_cases = [
         {'nets': 100, 'size_mm': 25, 'name': 'Small Board'},
-        {'nets': 500, 'size_mm': 50, name': 'Medium Board'},
+        {'nets': 500, 'size_mm': 50, 'name': 'Medium Board'},
         {'nets': 2000, 'size_mm': 100, 'name': 'Large Board'},
         {'nets': 8000, 'size_mm': 200, 'name': 'Extreme Board'}
     ]
