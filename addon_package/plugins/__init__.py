@@ -252,7 +252,7 @@ Note: Check the PCB editor to see the routed tracks."""
         }
     
     def _extract_pins_for_net(self, board, net_code):
-        """Extract pins for a specific net"""
+        """Extract pins for a specific net, excluding those already connected by filled zones"""
         pins = []
         
         # Find pads connected to this net
@@ -264,10 +264,72 @@ Note: Check the PCB editor to see the routed tracks."""
                     pins.append({
                         'x': int(pos.x),
                         'y': int(pos.y),
-                        'layer': 0 if layer == pcbnew.F_Cu else 1  # Simplified layer mapping
+                        'layer': 0 if layer == pcbnew.F_Cu else 1,  # Simplified layer mapping
+                        'pad': pad  # Keep reference for zone checking
                     })
         
+        # Check if pins are already connected by filled zones
+        if len(pins) >= 2:
+            connected_groups = self._find_zone_connected_groups(board, pins, net_code)
+            
+            # If all pins are in one connected group, no routing needed
+            if len(connected_groups) <= 1:
+                print(f"Net {net_code}: All pins connected by filled zones, skipping routing")
+                return []  # Return empty list to skip this net
+            
+            # Return representative pins from each group
+            representative_pins = []
+            for group in connected_groups:
+                # Take first pin from each group as representative
+                pin = group[0]
+                representative_pins.append({
+                    'x': pin['x'],
+                    'y': pin['y'], 
+                    'layer': pin['layer']
+                })
+            pins = representative_pins
+        
         return pins
+    
+    def _find_zone_connected_groups(self, board, pins, net_code):
+        """Find groups of pins connected by filled zones"""
+        # Get all filled zones for this net
+        zones = []
+        for zone in board.Zones():
+            if zone.GetNetCode() == net_code and zone.IsFilled():
+                zones.append(zone)
+        
+        if not zones:
+            # No zones, each pin is its own group
+            return [[pin] for pin in pins]
+        
+        # Group pins by zone connectivity
+        groups = []
+        ungrouped_pins = pins.copy()
+        
+        for zone in zones:
+            zone_pins = []
+            remaining_pins = []
+            
+            for pin in ungrouped_pins:
+                # Check if pin is inside this zone's filled area
+                pad_pos = pcbnew.VECTOR2I(pin['x'], pin['y'])
+                # Use the appropriate layer (F_Cu or B_Cu based on pin layer)
+                layer = pcbnew.F_Cu if pin['layer'] == 0 else pcbnew.B_Cu
+                if zone.HitTestFilledArea(layer, pad_pos, 0):
+                    zone_pins.append(pin)
+                else:
+                    remaining_pins.append(pin)
+            
+            if zone_pins:
+                groups.append(zone_pins)
+            ungrouped_pins = remaining_pins
+        
+        # Add any remaining ungrouped pins as individual groups
+        for pin in ungrouped_pins:
+            groups.append([pin])
+        
+        return groups
     
     def _import_routes(self, board, results):
         """Import routing results back to the board"""
