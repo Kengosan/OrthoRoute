@@ -23,9 +23,17 @@ except ImportError:
             class Device:
                 def __init__(self, gpu_id=0):
                     self.id = gpu_id
-                    self.name = "Mock GPU (CuPy not available)"
                 def use(self): pass
                 def mem_info(self): return (0, 8*1024**3)  # Mock 8GB
+                @property
+                def name(self):
+                    return "Mock GPU (CuPy not available)"
+            
+            class runtime:
+                @staticmethod
+                def getDeviceProperties(device_id):
+                    return {'name': b'Mock GPU (CuPy not available)'}
+                    
         def array(self, data): return data
         def ones(self, shape, dtype=None): return None
         def zeros(self, shape, dtype=None): return None
@@ -166,12 +174,29 @@ class GPUWavefrontRouter:
     
     def _route_net_gpu(self, net: Net) -> bool:
         """GPU-accelerated routing using CuPy"""
+        
+        # If CuPy is not available, fall back to CPU
+        if not CUPY_AVAILABLE:
+            print(f"⚠️ CuPy not available, falling back to CPU routing for {net.name}")
+            return self._route_net_cpu(net)
+        
         try:
-            # Initialize distance map
-            distance = cp.full((self.grid.layers, self.grid.height, self.grid.width), 
-                             cp.inf, dtype=cp.float32)
-            parent = cp.full((self.grid.layers, self.grid.height, self.grid.width, 3), 
-                           -1, dtype=cp.int32)
+            print(f"🚀 Starting GPU routing for {net.name}")
+            
+            # Initialize arrays on CPU first to avoid CuPy mock object issues
+            distance_cpu = np.full((self.grid.layers, self.grid.height, self.grid.width), 
+                                 np.inf, dtype=np.float32)
+            parent_cpu = np.full((self.grid.layers, self.grid.height, self.grid.width, 3), 
+                               -1, dtype=np.int32)
+            
+            # Only transfer to GPU if CuPy is truly available (not mock)
+            try:
+                distance = cp.array(distance_cpu)
+                parent = cp.array(parent_cpu)
+                print("✅ Arrays successfully transferred to GPU")
+            except Exception as e:
+                print(f"❌ GPU transfer failed: {e}, falling back to CPU")
+                return self._route_net_cpu(net)
             
             # Route between consecutive pins (minimum spanning tree approach)
             full_path = []
@@ -185,6 +210,8 @@ class GPUWavefrontRouter:
                 source = net.pins[i]
                 target = net.pins[i + 1]
                 
+                print(f"🔍 Routing segment {i}: ({source.x}, {source.y}, {source.z}) → ({target.x}, {target.y}, {target.z})")
+                
                 # Reset distance map
                 distance.fill(cp.inf)
                 parent.fill(-1)
@@ -192,8 +219,10 @@ class GPUWavefrontRouter:
                 # Run Lee's algorithm
                 path = self._lee_algorithm_gpu(source, target, distance, parent)
                 if not path:
-                    print(f"Failed to route segment {i} of net {net.id}")
+                    print(f"❌ Failed to route segment {i} of net {net.id}")
                     return False
+                
+                print(f"✅ Found path with {len(path)} points")
                 
                 # Add path to full route (avoid duplicating connection points)
                 if i == 0:
@@ -218,35 +247,43 @@ class GPUWavefrontRouter:
     
     def _lee_algorithm_gpu(self, source: Point3D, target: Point3D, distance, parent):
         """GPU implementation of Lee's algorithm"""
-        # Mark source
-        distance[source.z, source.y, source.x] = 0
         
-        # BFS wavefront expansion
-        current_wave = cp.array([[source.x, source.y, source.z]], dtype=cp.int32)
-        wave_distance = 0
-        
-        # Neighbor offsets (x, y, z)
-        neighbors = cp.array([
-            [1, 0, 0], [-1, 0, 0],  # X direction
-            [0, 1, 0], [0, -1, 0],  # Y direction
-            [0, 0, 1], [0, 0, -1]   # Z direction (via)
-        ], dtype=cp.int32)
-        
-        max_iterations = self.grid.width * self.grid.height * 2
-        
-        for iteration in range(max_iterations):
-            if len(current_wave) == 0:
-                break
-                
-            wave_distance += 1
-            next_wave = []
+        # Validate coordinates
+        if not (0 <= source.x < self.grid.width and 0 <= source.y < self.grid.height and 0 <= source.z < self.grid.layers):
+            print(f"❌ Source point ({source.x}, {source.y}, {source.z}) out of bounds")
+            return None
             
-            # Process each point in current wave
-            for point in current_wave:
-                x, y, z = int(point[0]), int(point[1]), int(point[2])
+        if not (0 <= target.x < self.grid.width and 0 <= target.y < self.grid.height and 0 <= target.z < self.grid.layers):
+            print(f"❌ Target point ({target.x}, {target.y}, {target.z}) out of bounds")
+            return None
+        
+        try:
+            print(f"🔍 Starting Lee's algorithm: source ({source.x},{source.y},{source.z}) → target ({target.x},{target.y},{target.z})")
+            
+            # Mark source
+            distance[source.z, source.y, source.x] = 0
+            
+            # Use CPU-based queue for better reliability
+            from collections import deque
+            queue = deque([(source.x, source.y, source.z, 0)])  # (x, y, z, dist)
+            
+            # Neighbor offsets (x, y, z) - only in-plane for now (no vias)
+            neighbors = [
+                (1, 0, 0), (-1, 0, 0),  # X direction
+                (0, 1, 0), (0, -1, 0),  # Y direction
+                # Temporarily disable vias: (0, 0, 1), (0, 0, -1)   # Z direction (via)
+            ]
+            
+            max_iterations = min(10000, self.grid.width * self.grid.height)  # Reasonable limit
+            iteration = 0
+            
+            while queue and iteration < max_iterations:
+                iteration += 1
+                x, y, z, dist = queue.popleft()
                 
                 # Check if we reached target
                 if x == target.x and y == target.y and z == target.z:
+                    print(f"✅ Found target at distance {dist}, iterations: {iteration}")
                     # Reconstruct path
                     return self._reconstruct_path_gpu(source, target, parent)
                 
@@ -259,37 +296,67 @@ class GPUWavefrontRouter:
                         0 <= ny < self.grid.height and 
                         0 <= nz < self.grid.layers):
                         
-                        # Check if available and not visited
-                        if (self.grid.availability[nz, ny, nx] and 
-                            distance[nz, ny, nx] == cp.inf):
-                            
-                            distance[nz, ny, nx] = wave_distance
-                            parent[nz, ny, nx] = [x, y, z]
-                            next_wave.append([nx, ny, nz])
+                        try:
+                            # Check if available and not visited
+                            if (self.grid.availability[nz, ny, nx] and 
+                                distance[nz, ny, nx] == cp.inf):
+                                
+                                distance[nz, ny, nx] = dist + 1
+                                parent[nz, ny, nx] = [x, y, z]
+                                queue.append((nx, ny, nz, dist + 1))
+                        except Exception as e:
+                            print(f"❌ Error accessing grid at ({nx},{ny},{nz}): {e}")
+                            continue
+                
+                if iteration % 1000 == 0:
+                    print(f"🔄 Lee's iteration {iteration}, queue size: {len(queue)}")
             
-            current_wave = cp.array(next_wave, dtype=cp.int32) if next_wave else cp.array([], dtype=cp.int32).reshape(0, 3)
-        
-        print(f"Lee's algorithm failed: no path found from {source} to {target}")
-        return None
+            print(f"❌ Target not reached after {iteration} iterations, queue size: {len(queue)}")
+            return None
+            
+        except Exception as e:
+            print(f"❌ Exception in Lee's algorithm: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
     
     def _reconstruct_path_gpu(self, source: Point3D, target: Point3D, parent):
         """Reconstruct path from parent array"""
-        path = []
-        current = target
-        
-        while current != source:
-            path.append(current)
+        try:
+            path = []
+            current = target
+            max_path_length = self.grid.width + self.grid.height  # Prevent infinite loops
             
-            # Get parent coordinates
-            px, py, pz = parent[current.z, current.y, current.x]
-            if px == -1:  # No parent found
-                return None
+            for step in range(max_path_length):
+                path.append(current)
                 
-            current = Point3D(int(px), int(py), int(pz))
-        
-        path.append(source)
-        path.reverse()
-        return path
+                # Check if we reached the source
+                if current.x == source.x and current.y == source.y and current.z == source.z:
+                    path.reverse()
+                    print(f"✅ Path reconstructed: {len(path)} points")
+                    return path
+                
+                # Get parent coordinates
+                try:
+                    parent_coords = parent[current.z, current.y, current.x]
+                    px, py, pz = int(parent_coords[0]), int(parent_coords[1]), int(parent_coords[2])
+                    
+                    if px == -1:  # No parent found
+                        print(f"❌ No parent found for point ({current.x}, {current.y}, {current.z})")
+                        return None
+                        
+                    current = Point3D(px, py, pz)
+                    
+                except Exception as e:
+                    print(f"❌ Error accessing parent at ({current.x}, {current.y}, {current.z}): {e}")
+                    return None
+            
+            print(f"❌ Path reconstruction exceeded maximum length ({max_path_length})")
+            return None
+            
+        except Exception as e:
+            print(f"❌ Exception in path reconstruction: {e}")
+            return None
     
     def _route_net_cpu(self, net: Net) -> bool:
         """CPU fallback routing (simple L-shaped paths)"""
@@ -543,11 +610,15 @@ class OrthoRouteEngine:
             debug_print(f"❌ Error loading board data: {e}")
             return False
     
-    def route(self, board_data: Dict, config: Dict = None) -> Dict:
+    def route(self, board_data: Dict, config: Dict = None, board=None) -> Dict:
         """Route the board with the given config."""
         debug_print = getattr(self, 'debug_print', print)
         
+        # Store board reference for track creation
+        self.board = board
+        
         debug_print(f"🚀 Starting route with engine {self.engine_id}")
+        debug_print(f"📋 Board reference available: {board is not None}")
         
         # Debug board data received
         debug_print(f"📊 Board data summary:")
@@ -575,10 +646,14 @@ class OrthoRouteEngine:
             }
         
         if not self.load_board_data(board_data):
+            debug_print("❌ CRITICAL: load_board_data returned False!")
             return {'success': False, 'error': 'Failed to load board data'}
+        
+        debug_print("✅ CHECKPOINT: Board data loaded successfully")
         
         # Parse nets with detailed logging
         debug_print("🔍 Parsing nets...")
+        debug_print("📍 CHECKPOINT: About to call _parse_nets")
         nets = self._parse_nets(board_data.get('nets', []), debug_print)
         debug_print(f"✅ Parsed {len(nets)} valid nets for routing")
         
@@ -606,13 +681,20 @@ class OrthoRouteEngine:
             (average_pins_per_net > 10)  # Complex nets benefit from grid routing
         )
         
+        debug_print(f"📍 CHECKPOINT 4: Grid routing decision")
+        debug_print(f"   Net count: {net_count}")
+        debug_print(f"   Average pins per net: {average_pins_per_net:.1f}")
+        debug_print(f"   Use grid routing: {use_grid_routing}")
+        
         successful_nets = []
         
         if use_grid_routing:
+            debug_print("📍 CHECKPOINT 5: Attempting grid routing")
             print("🏗️ Using innovative grid-based routing for complex design")
             try:
                 # Import grid router (lazy import to avoid circular dependencies)
                 from .grid_router import create_grid_router
+                debug_print("📍 Grid router imported successfully")
                 
                 # Create board data in format expected by grid router
                 grid_board_data = {
@@ -623,9 +705,12 @@ class OrthoRouteEngine:
                 }
                 
                 # Create and configure grid router
+                debug_print("📍 Creating grid router...")
                 grid_router = create_grid_router(grid_board_data, self.config)
+                debug_print(f"📍 Grid router created: {grid_router is not None}")
                 
                 if grid_router:
+                    debug_print("📍 Grid router available, converting nets...")
                     # Convert nets to grid router format
                     grid_nets = []
                     for net in nets:
@@ -637,8 +722,12 @@ class OrthoRouteEngine:
                         }
                         grid_nets.append(grid_net)
                     
+                    debug_print(f"📍 Converted {len(grid_nets)} nets for grid routing")
+                    
                     # Route using grid algorithm
+                    debug_print("📍 Starting grid routing...")
                     grid_results = grid_router.route_nets(grid_nets)
+                    debug_print(f"📍 Grid routing completed: {grid_results}")
                     
                     # Convert successful nets back to our format
                     for net_code, route_data in grid_results.get('routed_nets', {}).items():
@@ -650,32 +739,47 @@ class OrthoRouteEngine:
                     grid_router.cleanup()
                     print(f"✅ Grid routing completed: {len(successful_nets)}/{len(nets)} nets routed")
                 else:
-                    print("❌ Grid router creation failed, falling back to GPU wavefront")
+                    debug_print("❌ Grid router creation failed, falling back to GPU wavefront")
                     use_grid_routing = False
                     
             except ImportError as e:
-                print(f"⚠️ Grid router not available: {e}, using GPU wavefront")
+                debug_print(f"⚠️ Grid router not available: {e}, using GPU wavefront")
                 use_grid_routing = False
             except Exception as e:
-                print(f"⚠️ Grid routing failed: {e}, falling back to GPU wavefront")
+                debug_print(f"⚠️ Grid routing failed: {e}, falling back to GPU wavefront")
+                import traceback
+                debug_print(f"⚠️ Grid routing traceback: {traceback.format_exc()}")
                 use_grid_routing = False
+        else:
+            debug_print("📍 CHECKPOINT 5: Skipping grid routing")
         
         # Fall back to GPU wavefront routing if grid routing not used or failed
         if not use_grid_routing:
+            debug_print("📍 CHECKPOINT 6: Starting GPU wavefront routing")
+            print(f"🚀 Starting GPU wavefront routing for {len(nets)} nets...")
+            
             # Initialize router - use GPU router for real routing
             if CUPY_AVAILABLE:
+                debug_print("📍 CuPy available, creating GPU router")
                 router = GPUWavefrontRouter(self.grid)
                 print("🚀 Using GPU-accelerated wavefront routing")
             else:
+                debug_print("📍 CuPy not available, using CPU fallback")
                 router = GPUWavefrontRouter(self.grid)  # Has CPU fallback
                 print("🖥️ Using CPU fallback routing (CuPy not available)")
             
             # Set cancellation callback
+            debug_print("📍 Setting cancel callback")
             router.set_cancel_callback(should_cancel)
+            
+            debug_print(f"📍 Router initialized, starting route loop...")
             
             # Route nets with progress reporting
             try:
+                debug_print(f"📍 CHECKPOINT 7: Entering routing loop for {len(nets)} nets")
                 for i, net in enumerate(nets):
+                    debug_print(f"📍 Loop iteration {i}: Processing net '{net.name}' with {len(net.pins)} pins")
+                    
                     # Check for cancellation
                     if should_cancel():
                         print("🛑 Routing cancelled by user")
@@ -688,37 +792,66 @@ class OrthoRouteEngine:
                     
                     # Report routing start
                     if progress_callback:
-                        progress_callback({
-                            'current_net': net_name,
-                            'progress': net_progress,
-                            'stage': 'wavefront'
-                        })
+                        debug_print(f"📍 Calling progress_callback for net {net_name}")
+                        try:
+                            progress_callback({
+                                'current_net': net_name,
+                                'progress': net_progress,
+                                'stage': 'wavefront'
+                            })
+                        except Exception as e:
+                            debug_print(f"❌ Progress callback error: {e}")
                     
                     # Route the net
-                    if router.route_net(net):
+                    debug_print(f"📍 Calling router.route_net for {net_name}...")
+                    route_success = router.route_net(net)
+                    debug_print(f"📍 Router returned: {route_success} for {net_name}")
+                    
+                    if route_success:
                         successful_nets.append(net)
+                        debug_print(f"✅ Successfully routed {net_name}")
                         
                         # Report success
                         if progress_callback:
-                            progress_callback({
-                                'current_net': net_name,
-                                'progress': net_progress,
-                                'stage': 'complete',
-                                'success': True
-                            })
+                            try:
+                                progress_callback({
+                                    'current_net': net_name,
+                                    'progress': net_progress,
+                                    'stage': 'complete',
+                                    'success': True
+                                })
+                            except Exception as e:
+                                debug_print(f"❌ Progress callback error: {e}")
                     else:
+                        debug_print(f"❌ Failed to route {net_name}")
+                        
                         # Report failure
                         if progress_callback:
-                            progress_callback({
-                                'current_net': net_name,
-                                'progress': net_progress,
-                                'stage': 'complete',
-                                'success': False
-                            })
+                            try:
+                                progress_callback({
+                                    'current_net': net_name,
+                                    'progress': net_progress,
+                                    'stage': 'complete',
+                                    'success': False
+                                })
+                            except Exception as e:
+                                debug_print(f"❌ Progress callback error: {e}")
+                                
+                    debug_print(f"📍 Completed processing net {i+1}/{len(nets)}")
+                    
+                debug_print(f"📍 Route loop completed! Successfully routed: {len(successful_nets)}/{len(nets)} nets")
+                    
+            except Exception as routing_error:
+                debug_print(f"❌ Exception in routing loop: {routing_error}")
+                import traceback
+                debug_print(f"❌ Full traceback: {traceback.format_exc()}")
             finally:
                 # Always cleanup GPU resources
-                self._cleanup_gpu_resources()
-                print("🧹 GPU resources cleaned up")
+                try:
+                    self._cleanup_gpu_resources()
+                    debug_print("🧹 GPU resources cleaned up")
+                except Exception as cleanup_error:
+                    debug_print(f"❌ Cleanup error: {cleanup_error}")
         
         routing_time = time.time() - start_time
         print(f"Routing completed in {routing_time:.2f} seconds")
@@ -791,6 +924,10 @@ class OrthoRouteEngine:
                     pins=valid_pins,
                     width_nm=net_data.get('width_nm', 200000)
                 )
+                
+                # Store KiCad net reference for track creation
+                net.kicad_net = net_data.get('kicad_net', None)
+                
                 nets.append(net)
                 if i < 5:  # Show creation for first 5 nets
                     debug_print(f"   ✅ Net '{net_name}' created with {len(valid_pins)} valid pins")
@@ -814,13 +951,17 @@ class OrthoRouteEngine:
                 'success_rate': success_rate,
                 'total_time_seconds': routing_time
             },
-            'nets': []
+            'nets': [],
+            'tracks': []  # Add tracks to results for KiCad integration
         }
         
-        # Add net details
+        # Add net details AND create tracks
         for net in successful_nets:
             path_world = []
+            tracks_created = []
+            
             if net.route_path:
+                # Convert path to world coordinates
                 for point in net.route_path:
                     world_x, world_y = self.grid.grid_to_world(point.x, point.y)
                     path_world.append({
@@ -828,17 +969,133 @@ class OrthoRouteEngine:
                         'y': world_y,
                         'layer': point.z
                     })
+                
+                # CREATE ACTUAL KICAD TRACKS FROM PATH
+                tracks_created = self._create_tracks_from_path(net, path_world)
             
             net_data = {
                 'id': net.id,
                 'name': net.name,
                 'path': path_world,
                 'via_count': net.via_count,
-                'total_length_mm': net.total_length * self.grid.pitch_mm
+                'total_length_mm': net.total_length * self.grid.pitch_mm,
+                'tracks_created': len(tracks_created)
             }
             result['nets'].append(net_data)
+            result['tracks'].extend(tracks_created)
             
         return result
+    
+    def _create_tracks_from_path(self, net: Net, path_world: List[Dict]) -> List[Dict]:
+        """Convert route path to KiCad tracks - THIS WAS THE MISSING PIECE!"""
+        if not path_world or len(path_world) < 2:
+            return []
+        
+        debug_print = getattr(self, 'debug_print', print)
+        tracks_created = []
+        
+        try:
+            # Import KiCad modules
+            import pcbnew
+            
+            # Get board if available
+            board = getattr(self, 'board', None)
+            if not board:
+                debug_print("❌ No board available for track creation")
+                return []
+            
+            debug_print(f"🔨 Creating tracks for net {net.name} with {len(path_world)} points")
+            
+            # Create track segments between consecutive points
+            for i in range(len(path_world) - 1):
+                start_point = path_world[i]
+                end_point = path_world[i + 1]
+                
+                # Skip if same point (shouldn't happen but be safe)
+                if (start_point['x'] == end_point['x'] and 
+                    start_point['y'] == end_point['y'] and 
+                    start_point['layer'] == end_point['layer']):
+                    continue
+                
+                # Create track segment
+                track = pcbnew.PCB_TRACK(board)
+                
+                # Set start and end points (KiCad uses nanometers)
+                track.SetStart(pcbnew.VECTOR2I(int(start_point['x']), int(start_point['y'])))
+                track.SetEnd(pcbnew.VECTOR2I(int(end_point['x']), int(end_point['y'])))
+                
+                # Set layer
+                layer_id = self._get_kicad_layer_id(start_point['layer'])
+                track.SetLayer(layer_id)
+                
+                # Set net
+                if hasattr(net, 'kicad_net') and net.kicad_net:
+                    track.SetNet(net.kicad_net)
+                
+                # Set track width (default to net width or board default)
+                track_width = getattr(net, 'width', 200000)  # 0.2mm default
+                track.SetWidth(track_width)
+                
+                # Add to board
+                board.Add(track)
+                
+                tracks_created.append({
+                    'start': {'x': start_point['x'], 'y': start_point['y']},
+                    'end': {'x': end_point['x'], 'y': end_point['y']},
+                    'layer': start_point['layer'],
+                    'net_id': net.id,
+                    'net_name': net.name
+                })
+                
+                debug_print(f"  ✅ Track segment {i+1}: ({start_point['x']/1e6:.2f}, {start_point['y']/1e6:.2f}) → ({end_point['x']/1e6:.2f}, {end_point['y']/1e6:.2f})")
+            
+            # Handle layer changes (vias)
+            for i in range(len(path_world) - 1):
+                start_point = path_world[i]
+                end_point = path_world[i + 1]
+                
+                if start_point['layer'] != end_point['layer']:
+                    # Create via
+                    via = pcbnew.PCB_VIA(board)
+                    via.SetPosition(pcbnew.VECTOR2I(int(end_point['x']), int(end_point['y'])))
+                    
+                    # Set via properties
+                    via.SetViaType(pcbnew.VIATYPE_THROUGH)  # Through hole via
+                    if hasattr(net, 'kicad_net') and net.kicad_net:
+                        via.SetNet(net.kicad_net)
+                    
+                    board.Add(via)
+                    debug_print(f"  🔗 Via added at ({end_point['x']/1e6:.2f}, {end_point['y']/1e6:.2f}) layer {start_point['layer']}→{end_point['layer']}")
+            
+            debug_print(f"✅ Created {len(tracks_created)} track segments for net {net.name}")
+            return tracks_created
+            
+        except Exception as e:
+            debug_print(f"❌ Error creating tracks for net {net.name}: {e}")
+            import traceback
+            debug_print(f"❌ Traceback: {traceback.format_exc()}")
+            return []
+    
+    def _get_kicad_layer_id(self, internal_layer: int) -> int:
+        """Convert internal layer number to KiCad layer ID"""
+        try:
+            import pcbnew
+            
+            # Map internal layers to KiCad standard layers
+            layer_map = {
+                0: pcbnew.F_Cu,     # Front copper
+                1: pcbnew.B_Cu,     # Back copper
+                2: pcbnew.In1_Cu,   # Inner layer 1
+                3: pcbnew.In2_Cu,   # Inner layer 2
+                4: pcbnew.In3_Cu,   # Inner layer 3
+                5: pcbnew.In4_Cu,   # Inner layer 4
+                # Add more layers as needed
+            }
+            
+            return layer_map.get(internal_layer, pcbnew.F_Cu)  # Default to front copper
+            
+        except Exception:
+            return 0  # Fallback to layer 0
 
     def _cleanup_gpu_resources(self):
         """Clean up GPU memory and resources"""

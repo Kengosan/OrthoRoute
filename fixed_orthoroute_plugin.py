@@ -31,28 +31,21 @@ class OrthoRouteConfigDialog(wx.Dialog):
         # Grid pitch
         grid_pitch_sizer = wx.BoxSizer(wx.HORIZONTAL)
         grid_pitch_sizer.Add(wx.StaticText(panel, label="Grid Pitch (mm):"), 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 5)
-        self.grid_pitch_ctrl = wx.SpinCtrlDouble(panel)
-        self.grid_pitch_ctrl.SetValue(0.1)
-        self.grid_pitch_ctrl.SetRange(0.05, 1.0)
-        self.grid_pitch_ctrl.SetIncrement(0.05)
+        self.grid_pitch_ctrl = wx.SpinCtrlDouble(panel, value=0.1, min=0.05, max=1.0, inc=0.05)
         grid_pitch_sizer.Add(self.grid_pitch_ctrl, 1, wx.ALL, 5)
         params_box.Add(grid_pitch_sizer, 0, wx.ALL | wx.EXPAND, 5)
         
         # Max iterations
         iter_sizer = wx.BoxSizer(wx.HORIZONTAL)
         iter_sizer.Add(wx.StaticText(panel, label="Max Iterations:"), 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 5)
-        self.max_iter_ctrl = wx.SpinCtrl(panel)
-        self.max_iter_ctrl.SetValue(3)
-        self.max_iter_ctrl.SetRange(1, 10)
+        self.max_iter_ctrl = wx.SpinCtrl(panel, value=3, min=1, max=10)
         iter_sizer.Add(self.max_iter_ctrl, 1, wx.ALL, 5)
         params_box.Add(iter_sizer, 0, wx.ALL | wx.EXPAND, 5)
         
         # Via cost
         via_sizer = wx.BoxSizer(wx.HORIZONTAL)
         via_sizer.Add(wx.StaticText(panel, label="Via Cost:"), 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 5)
-        self.via_cost_ctrl = wx.SpinCtrl(panel)
-        self.via_cost_ctrl.SetValue(10)
-        self.via_cost_ctrl.SetRange(1, 100)
+        self.via_cost_ctrl = wx.SpinCtrl(panel, value=10, min=1, max=100)
         via_sizer.Add(self.via_cost_ctrl, 1, wx.ALL, 5)
         params_box.Add(via_sizer, 0, wx.ALL | wx.EXPAND, 5)
         
@@ -261,62 +254,41 @@ class OrthoRoutePlugin(pcbnew.ActionPlugin):
         
         print(f"📐 Board: {width_nm/1e6:.1f}mm x {height_nm/1e6:.1f}mm, {layer_count} layers")
         
-        # Extract nets with FIXED net-pad matching
+        # Extract nets
         nets_data = []
         netcodes = board.GetNetsByNetcode()
         
-        print(f"🔍 Found {len(netcodes)} total nets in board")
-        print("🔍 DEBUGGING: Listing ALL nets found:")
-        
         for netcode, kicad_net in netcodes.items():
-            net_name = kicad_net.GetNetname()
-            print(f"   Net {netcode}: '{net_name}'")
-            
             if netcode == 0:  # Skip unconnected net
-                print(f"     ⏭️ Skipped: unconnected (netcode 0)")
                 continue
                 
-            if not net_name:  # Skip unnamed nets
-                print(f"     ⏭️ Skipped: unnamed net")
+            net_name = kicad_net.GetNetname()
+            if not net_name or net_name.startswith('/'):  # Skip power nets for now
                 continue
             
-            # Get all pads for this net - FIXED VERSION
+            # Get all pads for this net
             pins = []
-            print(f"     🔍 Searching for pads...")
-            
-            # CORRECT approach: iterate through all footprints and pads
             for footprint in board.GetFootprints():
-                footprint_ref = footprint.GetReference()
                 for pad in footprint.Pads():
-                    # FIXED: Compare netcodes instead of net objects
-                    pad_net = pad.GetNet()
-                    if pad_net and pad_net.GetNetCode() == netcode:
+                    if pad.GetNet() == kicad_net:
                         pos = pad.GetPosition()
                         layer = pad.GetLayer()
-                        pad_name = pad.GetName()
                         
-                        # Convert layer to internal layer number (more robust)
-                        internal_layer = 0  # Default to front copper
-                        try:
-                            if layer == pcbnew.F_Cu:
-                                internal_layer = 0
-                            elif layer == pcbnew.B_Cu:
-                                internal_layer = 1 if layer_count >= 2 else 0
-                            elif hasattr(pcbnew, 'In1_Cu') and layer >= pcbnew.In1_Cu:
-                                internal_layer = min(layer - pcbnew.In1_Cu + 2, layer_count - 1)
-                        except:
-                            internal_layer = 0  # Fallback to front copper
+                        # Convert layer to internal layer number
+                        if layer == pcbnew.F_Cu:
+                            internal_layer = 0
+                        elif layer == pcbnew.B_Cu:
+                            internal_layer = 1
+                        else:
+                            internal_layer = min(layer - pcbnew.In1_Cu + 2, layer_count - 1)
                         
                         pins.append({
                             'x': int(pos.x),
                             'y': int(pos.y), 
                             'layer': internal_layer
                         })
-                        print(f"       📍 Found pad: {footprint_ref}.{pad_name} at ({pos.x/1e6:.2f}, {pos.y/1e6:.2f})mm")
             
-            print(f"     📊 Total pads found: {len(pins)}")
-            
-            # Include ALL nets with 2+ pins (no filtering for now)
+            # Only include nets with 2+ pins
             if len(pins) >= 2:
                 nets_data.append({
                     'id': netcode,
@@ -325,29 +297,6 @@ class OrthoRoutePlugin(pcbnew.ActionPlugin):
                     'kicad_net': kicad_net,  # Store KiCad net reference
                     'width_nm': 200000  # Default 0.2mm track width
                 })
-                print(f"     ✅ INCLUDED: Net '{net_name}' with {len(pins)} pins")
-            else:
-                print(f"     ⏭️ EXCLUDED: Net '{net_name}' has only {len(pins)} pins (need 2+)")
-        
-        print(f"📊 FINAL RESULT: {len(nets_data)} routeable nets found")
-        
-        # If still no nets, show some board info
-        if len(nets_data) == 0:
-            print("🚨 DEBUGGING: No nets found! Board analysis:")
-            print(f"   - Footprints: {len(list(board.GetFootprints()))}")
-            print(f"   - Copper layers: {layer_count}")
-            print(f"   - Board area: {width_nm/1e6:.1f} x {height_nm/1e6:.1f} mm")
-            
-            # Show first few footprints
-            footprints = list(board.GetFootprints())
-            for i, fp in enumerate(footprints[:3]):
-                print(f"   - Footprint {i+1}: {fp.GetReference()} ({len(list(fp.Pads()))} pads)")
-                for j, pad in enumerate(list(fp.Pads())[:2]):
-                    pad_net = pad.GetNet()
-                    pad_net_name = pad_net.GetNetname() if pad_net else "No net"
-                    print(f"     - Pad {j+1}: {pad.GetName()} -> '{pad_net_name}'")
-                    
-        print(f"📊 Net extraction complete: {len(nets_data)} nets ready for routing")
         
         board_data = {
             'bounds': {

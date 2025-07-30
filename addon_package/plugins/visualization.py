@@ -53,6 +53,7 @@ class RoutingCanvas(wx.Panel):
             'background': wx.Colour(20, 20, 20),
             'board': wx.Colour(40, 60, 40),
             'pad': wx.Colour(200, 200, 100),
+            'keepout': wx.Colour(80, 80, 60),  # Lighter color for keepout areas
             'trace': wx.Colour(0, 255, 0),
             'current_trace': wx.Colour(255, 100, 100),
             'via': wx.Colour(150, 150, 255),
@@ -211,24 +212,86 @@ class RoutingCanvas(wx.Panel):
             dc.DrawLine(int(x), i, int(x + w), i)
             
     def _draw_pads(self, dc):
-        """Draw PCB pads"""
+        """Draw PCB pads with accurate shapes and keepout areas"""
         print(f"🎨 Drawing {len(self.pads)} pads...")
-        dc.SetPen(wx.Pen(self.colors['pad'], 1))
-        dc.SetBrush(wx.Brush(self.colors['pad']))
         
         drawn_count = 0
         for i, pad in enumerate(self.pads):
             bounds = pad.get('bounds', [0, 0, 1, 1])
             if len(bounds) >= 4:
                 x, y, w, h = bounds
+                
+                # Get actual pad properties
+                center = pad.get('center', [x + w/2, y + h/2])
+                actual_size = pad.get('actual_size', [w, h])
+                pad_shape = pad.get('shape', 'rect')
+                drill_size = pad.get('drill_size', 0.0)
+                
+                center_x, center_y = center
+                actual_w, actual_h = actual_size
+                
                 # Debug output for first few pads
                 if i < 3:
-                    print(f"   Pad {i}: bounds=({x:.2f}, {y:.2f}, {w:.2f}, {h:.2f})mm")
-                # Draw pad (coordinates are in mm, transform handles pixel conversion)
-                dc.DrawRectangle(int(x), int(y), max(1, int(w)), max(1, int(h)))
+                    print(f"   Pad {i}: {pad_shape} ({actual_w:.2f}x{actual_h:.2f}mm) at ({center_x:.2f}, {center_y:.2f}mm)")
+                    if drill_size > 0:
+                        print(f"     Drill: {drill_size:.2f}mm")
+                
+                # Draw keepout area first (larger, transparent)
+                keepout_margin = 0.3  # 0.3mm keepout margin
+                keepout_w = actual_w + keepout_margin * 2
+                keepout_h = actual_h + keepout_margin * 2
+                
+                dc.SetPen(wx.Pen(self.colors['keepout'], 1))
+                dc.SetBrush(wx.Brush(self.colors['keepout'], wx.BRUSHSTYLE_TRANSPARENT))
+                
+                # Draw keepout based on pad shape
+                if pad_shape == 'circle':
+                    radius = max(keepout_w, keepout_h) / 2
+                    dc.DrawCircle(int(center_x), int(center_y), int(radius))
+                elif pad_shape == 'oval':
+                    # Draw oval keepout as circle with max dimension
+                    radius = max(keepout_w, keepout_h) / 2
+                    dc.DrawCircle(int(center_x), int(center_y), int(radius))
+                else:  # Rectangle, roundrect, trapezoid, etc.
+                    dc.DrawRectangle(int(center_x - keepout_w/2), int(center_y - keepout_h/2), 
+                                   max(1, int(keepout_w)), max(1, int(keepout_h)))
+                
+                # Draw actual pad shape (solid)
+                dc.SetPen(wx.Pen(self.colors['pad'], 1))
+                dc.SetBrush(wx.Brush(self.colors['pad']))
+                
+                # Draw pad based on actual shape
+                if pad_shape == 'circle':
+                    radius = min(actual_w, actual_h) / 2
+                    dc.DrawCircle(int(center_x), int(center_y), max(1, int(radius)))
+                elif pad_shape == 'oval':
+                    # Draw oval as ellipse or circle
+                    if abs(actual_w - actual_h) < 0.1:
+                        radius = min(actual_w, actual_h) / 2
+                        dc.DrawCircle(int(center_x), int(center_y), max(1, int(radius)))
+                    else:
+                        # For oval, draw as rounded rectangle approximation
+                        dc.DrawRectangle(int(center_x - actual_w/2), int(center_y - actual_h/2), 
+                                       max(1, int(actual_w)), max(1, int(actual_h)))
+                elif pad_shape == 'roundrect':
+                    # Draw rounded rectangle as regular rectangle for now
+                    dc.DrawRectangle(int(center_x - actual_w/2), int(center_y - actual_h/2), 
+                                   max(1, int(actual_w)), max(1, int(actual_h)))
+                else:  # rect, trapezoid, chamfered_rect, custom
+                    # Draw as rectangle
+                    dc.DrawRectangle(int(center_x - actual_w/2), int(center_y - actual_h/2), 
+                                   max(1, int(actual_w)), max(1, int(actual_h)))
+                
+                # Draw drill hole if it's a through-hole pad
+                if drill_size > 0.2:  # Only draw if drill is significant (>0.2mm)
+                    dc.SetPen(wx.Pen(self.colors['background'], 1))
+                    dc.SetBrush(wx.Brush(self.colors['background']))
+                    drill_radius = drill_size / 2
+                    dc.DrawCircle(int(center_x), int(center_y), max(1, int(drill_radius)))
+                
                 drawn_count += 1
         
-        print(f"🎨 Drew {drawn_count} pads")
+        print(f"🎨 Drew {drawn_count} pads with accurate shapes and keepouts")
             
     def _draw_obstacles(self, dc):
         """Draw obstacles and existing traces"""
@@ -594,23 +657,24 @@ class RoutingProgressDialog(wx.Dialog):
         """Zoom in on the visualization"""
         self.viz_panel.zoom_factor = min(20.0, self.viz_panel.zoom_factor * 1.5)
         self.zoom_label.SetLabel(f"Zoom: {self.viz_panel.zoom_factor * 100:.0f}%")
-        self.viz_panel.Refresh()
+        self.viz_panel.UpdateDrawing()  # Force redraw with new zoom
         
     def _zoom_out(self):
         """Zoom out on the visualization"""
         self.viz_panel.zoom_factor = max(0.1, self.viz_panel.zoom_factor / 1.5)
         self.zoom_label.SetLabel(f"Zoom: {self.viz_panel.zoom_factor * 100:.0f}%")
-        self.viz_panel.Refresh()
+        self.viz_panel.UpdateDrawing()  # Force redraw with new zoom
         
     def _zoom_fit(self):
         """Fit the view to show the entire board"""
         self.viz_panel._fit_to_board()
-        self.viz_panel.Refresh()
+        self.zoom_label.SetLabel(f"Zoom: {self.viz_panel.zoom_factor * 100:.0f}%")
+        self.viz_panel.UpdateDrawing()  # Force redraw with new zoom
         
     def _pan_reset(self):
         """Reset pan to center"""
         self.viz_panel.pan_offset = [0, 0]
-        self.viz_panel.Refresh()
+        self.viz_panel.UpdateDrawing()  # Force redraw with reset pan
     
     def set_board_data(self, board_bounds, pads=None, obstacles=None):
         """Set board data for visualization"""

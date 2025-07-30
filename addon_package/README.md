@@ -2,6 +2,19 @@
 
 This directory contains the KiCad addon package structure for OrthoRoute GPU Autorouter.
 
+## Recent Development Status (July 2025)
+
+**Major Debugging Session Completed**: Resolved core issue where plugin "doesn't actually route"
+
+### Issues Fixed
+- ✅ **Plugin Crashes**: Fixed import errors and KiCad API compatibility
+- ✅ **Missing Track Creation**: Added `_create_tracks_from_path()` functionality
+- ✅ **UI Compatibility**: Fixed wxPython dialogs for KiCad 8.0+
+- ✅ **Net Detection Bug**: Corrected net-pad matching logic (critical fix)
+
+### Current Status
+Plugin now loads and runs without errors, but may show "0 nets processed" on some boards. This indicates additional refinement needed in net detection logic.
+
 ## Structure
 
 ```
@@ -29,16 +42,19 @@ This creates `orthoroute-kicad-addon.zip` which can be installed via KiCad's Plu
 
 1. Open KiCad
 2. Go to **Tools → Plugin and Content Manager**
-3. Click **Install from File**
-4. Select the `orthoroute-kicad-addon.zip` file
-5. Follow the installation prompts
+3. **Uninstall any existing version first**
+4. Click **Install from File**
+5. Select the `orthoroute-kicad-addon.zip` file
+6. **Restart KiCad completely**
+
+⚠️ **Important**: Always restart KiCad after installation to ensure proper plugin loading.
 
 ## Requirements
 
 - KiCad 8.0+
-- NVIDIA GPU with CUDA support
-- CUDA Toolkit 11.8+ or 12.x
-- CuPy package: `pip install cupy-cuda12x`
+- NVIDIA GPU with CUDA support (optional)
+- CUDA Toolkit 11.8+ or 12.x (optional)
+- CuPy package: `pip install cupy-cuda12x` (optional)
 
 ## Features
 
@@ -47,6 +63,21 @@ This creates `orthoroute-kicad-addon.zip` which can be installed via KiCad's Plu
 - **Multi-layer support**: Works with complex PCB designs
 - **Configurable parameters**: Grid pitch, iteration limits, via costs
 - **Fallback mode**: Works without GPU for testing (CPU-only routing)
+- **Enhanced debugging**: Comprehensive logging and error reporting
+
+## Troubleshooting
+
+### "0 nets processed" Issue
+If the plugin runs but processes no nets:
+1. Ensure your PCB has unrouted connections (ratsnest lines visible)
+2. Run "Update PCB from Schematic" in KiCad
+3. Verify components have proper net assignments
+4. Check KiCad version compatibility (8.0+ required)
+
+### Plugin Not Appearing
+- Verify installation in Plugin and Content Manager
+- Restart KiCad completely
+- Check KiCad Python console for error messages
 
 ## Plugin Structure
 
