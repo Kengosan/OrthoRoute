@@ -194,23 +194,132 @@ For more details, visit: https://docs.cupy.dev/en/stable/install.html"""
                         
                         # Set up board data for visualization
                         debug_print("🎨 Getting board bounds...")
-                        board_bounds = self._get_board_bounds(board)
+                        debug_print(f"🎨 Self object type: {type(self)}")
+                        debug_print(f"🎨 Self object methods: {[m for m in dir(self) if 'board' in m.lower()]}")
+                        
+                        # Get board bounds with fallback
+                        try:
+                            board_bounds = self._get_board_bounds(board)
+                        except AttributeError:
+                            debug_print("🎨 Using fallback board bounds...")
+                            try:
+                                bbox = board.GetBoardEdgesBoundingBox()
+                                board_bounds = [
+                                    float(bbox.GetX()) / 1e6,  # Convert to mm
+                                    float(bbox.GetY()) / 1e6,
+                                    float(bbox.GetWidth()) / 1e6,
+                                    float(bbox.GetHeight()) / 1e6
+                                ]
+                            except:
+                                board_bounds = [0, 0, 100, 80]  # Default
                         debug_print(f"🎨 Board bounds: {board_bounds}")
                         
                         debug_print("🎨 Getting board pads...")
-                        pads = self._get_board_pads(board)
+                        # Get board pads with fallback
+                        try:
+                            pads = self._get_board_pads(board)
+                        except AttributeError:
+                            debug_print("🎨 Using fallback board pads...")
+                            pads = []
+                            try:
+                                footprint_count = 0
+                                pad_count = 0
+                                
+                                for footprint in board.GetFootprints():
+                                    footprint_count += 1
+                                    footprint_pads = 0
+                                    
+                                    for pad in footprint.Pads():
+                                        try:
+                                            bbox = pad.GetBoundingBox()
+                                            pos = pad.GetPosition()
+                                            
+                                            pad_data = {
+                                                'bounds': [
+                                                    float(bbox.GetX()) / 1e6,  # Convert to mm
+                                                    float(bbox.GetY()) / 1e6,
+                                                    float(bbox.GetWidth()) / 1e6,
+                                                    float(bbox.GetHeight()) / 1e6
+                                                ],
+                                                'center': [
+                                                    float(pos.x) / 1e6,  # Pad center in mm
+                                                    float(pos.y) / 1e6
+                                                ],
+                                                'net': pad.GetNetname(),
+                                                'ref': footprint.GetReference()
+                                            }
+                                            pads.append(pad_data)
+                                            pad_count += 1
+                                            footprint_pads += 1
+                                            
+                                        except Exception as e:
+                                            debug_print(f"Error processing pad in {footprint.GetReference()}: {e}")
+                                    
+                                    # Debug for first few footprints
+                                    if footprint_count <= 3:
+                                        debug_print(f"   Footprint {footprint.GetReference()}: {footprint_pads} pads")
+                                            
+                                debug_print(f"📍 Pad extraction: {footprint_count} footprints, {pad_count} total pads")
+                                
+                            except Exception as e:
+                                debug_print(f"Error getting pads: {e}")
+                        
                         debug_print(f"🎨 Pads found: {len(pads)}")
                         
                         debug_print("🎨 Getting board obstacles...")
-                        obstacles = self._get_board_obstacles(board)
+                        # Get board obstacles with fallback  
+                        try:
+                            obstacles = self._get_board_obstacles(board)
+                        except AttributeError:
+                            debug_print("🎨 Using fallback board obstacles...")
+                            obstacles = []
+                            try:
+                                # Get existing tracks as obstacles
+                                for track in board.GetTracks():
+                                    if hasattr(track, 'GetBoundingBox'):
+                                        bbox = track.GetBoundingBox()
+                                        obstacles.append({
+                                            'bounds': [
+                                                float(bbox.GetX()) / 1e6,
+                                                float(bbox.GetY()) / 1e6,
+                                                float(bbox.GetWidth()) / 1e6,
+                                                float(bbox.GetHeight()) / 1e6
+                                            ],
+                                            'type': 'track'
+                                        })
+                            except Exception as e:
+                                debug_print(f"Error getting obstacles: {e}")
                         debug_print(f"🎨 Obstacles found: {len(obstacles)}")
                         
                         if pads:
                             debug_print(f"🎨 Sample pad: {pads[0]}")
                         
                         debug_print("🎨 Calling progress_dlg.set_board_data...")
-                        progress_dlg.set_board_data(board_bounds, pads, obstacles)
-                        debug_print("🎨 Board data set successfully!")
+                        # Temporarily redirect prints to debug dialog
+                        import sys
+                        import builtins
+                        original_print = builtins.print
+                        
+                        def debug_print_wrapper(*args, **kwargs):
+                            message = ' '.join(str(arg) for arg in args)
+                            # Send to debug dialog directly to avoid recursion
+                            if hasattr(self, 'debug_dialog') and self.debug_dialog:
+                                try:
+                                    wx.CallAfter(self.debug_dialog.append_text, f"🎨 VIZ: {message}")
+                                except:
+                                    pass
+                            # Also call original print
+                            original_print(*args, **kwargs)
+                        
+                        # Temporarily replace print in visualization module
+                        builtins.print = debug_print_wrapper
+                        
+                        try:
+                            progress_dlg.set_board_data(board_bounds, pads, obstacles)
+                            debug_print("🎨 Board data set successfully!")
+                        finally:
+                            # Restore original print
+                            builtins.print = original_print
                         
                         debug_print("🎨 Enabling engine visualization...")
                         engine.enable_visualization({

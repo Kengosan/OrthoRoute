@@ -45,6 +45,9 @@ class RoutingCanvas(wx.Panel):
         self.last_mouse_pos = None
         self.dragging = False
         
+        # Initialize buffer for double buffering
+        self._buffer = None
+        
         # Colors
         self.colors = {
             'background': wx.Colour(20, 20, 20),
@@ -67,21 +70,24 @@ class RoutingCanvas(wx.Panel):
         
     def set_board_data(self, board_bounds, pads, obstacles):
         """Set the PCB board data for visualization"""
-        print(f"🎨 Visualization receiving board data:")
-        print(f"   Board bounds: {board_bounds}")
-        print(f"   Pads: {len(pads) if pads else 0}")
-        print(f"   Obstacles: {len(obstacles) if obstacles else 0}")
+        print(f"🎨 VIZ: Receiving board data:")
+        print(f"🎨 VIZ:    Board bounds: {board_bounds}")
+        print(f"🎨 VIZ:    Pads: {len(pads) if pads else 0}")
+        print(f"🎨 VIZ:    Obstacles: {len(obstacles) if obstacles else 0}")
         
         self.board_bounds = board_bounds
         self.pads = pads
         self.obstacles = obstacles
         self._fit_to_board()
-        self.Refresh()
         
-        print(f"🎨 Visualization data set, refreshing canvas...")
+        print(f"🎨 VIZ: Data set, calling UpdateDrawing to trigger rendering...")
+        self.UpdateDrawing()  # This is the missing call that triggers Draw()!
+        
+        print(f"🎨 VIZ: UpdateDrawing complete, canvas should now be visible!")
         
     def add_routing_segment(self, net_name, start_pos, end_pos, layer):
         """Add a routing segment to the visualization"""
+        print(f"🎨 VIZ: Adding routing segment for net {net_name}")
         self.routing_data.append({
             'net': net_name,
             'start': start_pos,
@@ -89,48 +95,90 @@ class RoutingCanvas(wx.Panel):
             'layer': layer,
             'timestamp': time.time()
         })
-        self.Refresh()
+        self.UpdateDrawing()  # Trigger re-render
         
     def set_current_nets(self, nets):
         """Set the currently active nets being routed"""
+        print(f"🎨 VIZ: Setting current nets: {len(nets) if nets else 0}")
         self.current_nets = nets
-        self.Refresh()
+        self.UpdateDrawing()  # Trigger re-render
         
-    def _on_paint(self, event):
-        """Handle paint events"""
-        # Use buffered painting for smooth updates
-        size = self.GetSize()
-        bitmap = wx.Bitmap(size.width, size.height)
-        dc = wx.MemoryDC(bitmap)
+    def Draw(self, dc):
+        """Main drawing method - called by UpdateDrawing()"""
+        print(f"🎨 VIZ: Draw() method called! Canvas size: {self.GetSize()}")
         
         # Clear background
         dc.SetBackground(wx.Brush(self.colors['background']))
         dc.Clear()
         
-        # Set up coordinate transformation
+        # Setup coordinate transformation
         self._setup_transform(dc)
         
         # Draw PCB elements
         if self.board_bounds:
+            print(f"🎨 VIZ: Drawing board with bounds: {self.board_bounds}")
             self._draw_board(dc)
             self._draw_grid(dc)
             self._draw_pads(dc)
             self._draw_obstacles(dc)
             self._draw_routing(dc)
             self._draw_current_nets(dc)
+        else:
+            print(f"🎨 VIZ: No board bounds available for drawing")
             
         # Draw info overlay
         self._draw_info_overlay(dc)
         
-        # Blit to screen
-        screen_dc = wx.PaintDC(self)
-        screen_dc.Blit(0, 0, size.width, size.height, dc, 0, 0)
+        print(f"🎨 VIZ: Draw() method complete!")
+        
+    def UpdateDrawing(self):
+        """Update the canvas by drawing to buffer and refreshing"""
+        print(f"🎨 VIZ: UpdateDrawing() called")
+        
+        # Get current size
+        size = self.GetSize()
+        if size.width <= 0 or size.height <= 0:
+            print(f"🎨 VIZ: Canvas size invalid: {size}")
+            return
+            
+        # Create or recreate buffer if size changed
+        if not self._buffer or self._buffer.GetSize() != size:
+            print(f"🎨 VIZ: Creating new buffer: {size}")
+            self._buffer = wx.Bitmap(size.width, size.height)
+            
+        # Draw to buffer
+        dc = wx.MemoryDC()
+        dc.SelectObject(self._buffer)
+        
+        # Call our Draw method
+        self.Draw(dc)
+        
+        # Clean up and refresh
+        del dc
+        self.Refresh()
+        self.Update()
+        
+        print(f"🎨 VIZ: UpdateDrawing() complete!")
+        
+    def _on_paint(self, event):
+        """Handle paint events - just copy buffer to screen"""
+        print(f"🎨 VIZ: _on_paint() called")
+        
+        # If we have a buffer, just copy it to screen
+        if self._buffer:
+            dc = wx.PaintDC(self)
+            dc.DrawBitmap(self._buffer, 0, 0)
+            print(f"🎨 VIZ: Buffer copied to screen")
+        else:
+            # No buffer yet, force UpdateDrawing
+            print(f"🎨 VIZ: No buffer, calling UpdateDrawing")
+            self.UpdateDrawing()
         
     def _setup_transform(self, dc):
         """Set up coordinate transformation for zoom and pan"""
         size = self.GetSize()
-        dc.SetDeviceOrigin(size.width // 2 + self.pan_offset[0], 
-                          size.height // 2 + self.pan_offset[1])
+        dc.SetDeviceOrigin(size.width // 2 + int(self.pan_offset[0]), 
+                          size.height // 2 + int(self.pan_offset[1]))
         dc.SetUserScale(self.zoom_factor, self.zoom_factor)
         
     def _draw_board(self, dc):
@@ -258,7 +306,8 @@ class RoutingCanvas(wx.Panel):
             
     def _on_size(self, event):
         """Handle window resize"""
-        self.Refresh()
+        print(f"🎨 VIZ: Canvas resized to {self.GetSize()}")
+        self.UpdateDrawing()  # Recreate buffer and redraw
         event.Skip()
         
     def _on_left_down(self, event):
