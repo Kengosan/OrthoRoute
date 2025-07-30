@@ -89,46 +89,219 @@ For more details, visit: https://docs.cupy.dev/en/stable/install.html"""
             # Import here to avoid early import errors
             import cupy as cp
             
-            # Show progress dialog
-            progress_dlg = wx.ProgressDialog(
-                "OrthoRoute GPU Autorouter",
-                "Initializing GPU routing engine...",
-                maximum=100,
-                style=wx.PD_APP_MODAL | wx.PD_AUTO_HIDE | wx.PD_CAN_ABORT
+            # Create debug output dialog first
+            debug_dialog = wx.Dialog(None, title="OrthoRoute Debug Output", 
+                                   style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
+            debug_dialog.SetSize((600, 400))
+            
+            debug_text = wx.TextCtrl(debug_dialog, style=wx.TE_MULTILINE | wx.TE_READONLY)
+            debug_sizer = wx.BoxSizer(wx.VERTICAL)
+            debug_sizer.Add(debug_text, 1, wx.EXPAND | wx.ALL, 5)
+            
+            close_btn = wx.Button(debug_dialog, wx.ID_OK, "Close")
+            debug_sizer.Add(close_btn, 0, wx.ALIGN_CENTER | wx.ALL, 5)
+            debug_dialog.SetSizer(debug_sizer)
+            debug_dialog.Show()
+            
+            def debug_print(msg):
+                """Print to both console and debug dialog with buffering"""
+                print(msg)
+                debug_text.AppendText(msg + "\n")
+                # Only update UI every 10 messages or on important messages
+                if hasattr(debug_print, '_msg_count'):
+                    debug_print._msg_count += 1
+                else:
+                    debug_print._msg_count = 1
+                    
+                if (debug_print._msg_count % 10 == 0 or 
+                    any(keyword in msg for keyword in ['✅', '❌', '📊', '🚀', '🔍'])):
+                    wx.SafeYield()  # Update UI only occasionally
+            
+            debug_print("🔍 OrthoRoute Debug Output")
+            debug_print("=" * 40)
+            
+            # Show enhanced progress dialog with visualization
+            from .visualization import RoutingProgressDialog
+            progress_dlg = RoutingProgressDialog(
+                parent=None,
+                title="OrthoRoute - GPU Routing Progress"
             )
+            progress_dlg.Show()
             
             try:
-                # Export board data
+                # Export board data with detailed logging
                 progress_dlg.Update(10, "Exporting board data...")
-                print("Exporting board data...")
-                board_data = self._export_board_data(board)
-                print(f"Exported {len(board_data.get('nets', []))} nets")
+                debug_print("🔍 Exporting board data...")
+                
+                try:
+                    board_data = self._export_board_data(board, debug_print)
+                    debug_print(f"📊 Board export results:")
+                    debug_print(f"   - Board bounds: {board_data.get('bounds', {})}")
+                    debug_print(f"   - Nets found: {len(board_data.get('nets', []))}")
+                    
+                    # Print first few nets for debugging
+                    nets = board_data.get('nets', [])
+                    for i, net in enumerate(nets[:3]):  # Show first 3 nets
+                        pins = net.get('pins', [])
+                        debug_print(f"   - Net {i+1}: {net.get('name', 'Unknown')} ({len(pins)} pins)")
+                        for j, pin in enumerate(pins[:2]):  # Show first 2 pins
+                            debug_print(f"     Pin {j+1}: ({pin.get('x', 0)/1e6:.2f}, {pin.get('y', 0)/1e6:.2f}) mm, layer {pin.get('layer', 0)}")
+                    
+                    if len(nets) > 3:
+                        debug_print(f"   - ... and {len(nets) - 3} more nets")
+                        
+                except Exception as export_error:
+                    debug_print(f"❌ Board export failed: {export_error}")
+                    import traceback
+                    debug_print(traceback.format_exc())
+                    wx.MessageBox(f"Failed to export board data: {export_error}", 
+                                "Export Error", wx.OK | wx.ICON_ERROR)
+                    return
                 
                 if not board_data.get('nets'):
-                    wx.MessageBox("No nets found to route. Please ensure your PCB has nets with pads.", 
+                    debug_print("⚠️ No nets found to route!")
+                    debug_print("🔍 Troubleshooting suggestions:")
+                    debug_print("   1. Ensure your PCB has components with pads")
+                    debug_print("   2. Ensure components are assigned to nets (connected)")
+                    debug_print("   3. Check that nets aren't already fully routed")
+                    debug_print("   4. Try updating netlist from schematic")
+                    
+                    wx.MessageBox("No nets found to route.\n\nPlease ensure your PCB has:\n" +
+                                "• Components with pads\n" +
+                                "• Nets assigned to pads\n" +
+                                "• Unrouted connections\n\n" +
+                                "Check the debug dialog for detailed diagnostics.", 
                                 "No Nets Found", wx.OK | wx.ICON_WARNING)
                     return
                 
                 # Initialize GPU engine
                 progress_dlg.Update(20, "Initializing routing engine...")
-                print("Initializing routing engine...")
+                debug_print("Initializing routing engine...")
                 from .orthoroute_engine import OrthoRouteEngine
                 engine = OrthoRouteEngine()
                 
-                # Enable visualization if requested
-                if config.get('enable_visualization', False):
-                    progress_dlg.Update(30, "Setting up visualization...")
-                    print("Setting up visualization...")
-                    engine.enable_visualization({
-                        'real_time': True,
-                        'show_progress': True
-                    })
+                # Pass debug_print to engine for logging
+                engine.debug_print = debug_print
                 
-                # Route the board
+                # Enable visualization if requested (force enabled for debugging)
+                enable_viz = config.get('enable_visualization', True)  # Default to True
+                debug_print(f"🎨 Visualization enabled: {enable_viz}")
+                if enable_viz:
+                    try:
+                        debug_print("🎨 Starting visualization setup...")
+                        progress_dlg.update_progress(0.3, 0.0, "Setting up visualization...")
+                        debug_print("🎨 Setting up visualization...")
+                        
+                        # Set up board data for visualization
+                        debug_print("🎨 Getting board bounds...")
+                        board_bounds = self._get_board_bounds(board)
+                        debug_print(f"🎨 Board bounds: {board_bounds}")
+                        
+                        debug_print("🎨 Getting board pads...")
+                        pads = self._get_board_pads(board)
+                        debug_print(f"🎨 Pads found: {len(pads)}")
+                        
+                        debug_print("🎨 Getting board obstacles...")
+                        obstacles = self._get_board_obstacles(board)
+                        debug_print(f"🎨 Obstacles found: {len(obstacles)}")
+                        
+                        if pads:
+                            debug_print(f"🎨 Sample pad: {pads[0]}")
+                        
+                        debug_print("🎨 Calling progress_dlg.set_board_data...")
+                        progress_dlg.set_board_data(board_bounds, pads, obstacles)
+                        debug_print("🎨 Board data set successfully!")
+                        
+                        debug_print("🎨 Enabling engine visualization...")
+                        engine.enable_visualization({
+                            'real_time': True,
+                            'show_progress': True,
+                            'progress_callback': progress_dlg.add_routing_segment
+                        })
+                        debug_print("🎨 Visualization setup complete!")
+                    except Exception as e:
+                        debug_print(f"❌ Visualization setup failed: {e}")
+                        import traceback
+                        debug_print(f"❌ Full traceback: {traceback.format_exc()}")
+                        # Fall back to basic progress dialog
+                        progress_dlg.Update(30, "Visualization setup failed, continuing...")
+                else:
+                    progress_dlg.Update(30, "Skipping visualization...")
+                
+                # Route the board with threading for UI responsiveness
                 progress_dlg.Update(40, "Starting routing...")
                 print("Starting routing...")
-                results = engine.route(board_data, config)
-                print(f"Routing completed with success={results.get('success', False)}")
+                
+                # Use threading to keep UI responsive
+                import threading
+                routing_complete = False
+                routing_results = {}
+                routing_error = None
+                self.routing_cancelled = False  # Add cancellation flag
+                
+                def routing_worker():
+                    """Run routing in separate thread"""
+                    nonlocal routing_complete, routing_results, routing_error
+                    try:
+                        # Add cancellation callback to config
+                        config_with_cancel = config.copy()
+                        config_with_cancel['should_cancel'] = lambda: self.routing_cancelled
+                        
+                        routing_results = engine.route(board_data, config_with_cancel)
+                        print(f"Routing completed with success={routing_results.get('success', False)}")
+                    except Exception as e:
+                        routing_error = e
+                        print(f"Routing error: {e}")
+                    finally:
+                        routing_complete = True
+                        # Always cleanup on exit
+                        try:
+                            engine._cleanup_gpu_resources()
+                        except Exception as cleanup_error:
+                            print(f"Cleanup error: {cleanup_error}")
+                
+                # Start routing thread
+                routing_thread = threading.Thread(target=routing_worker, daemon=True)
+                routing_thread.start()
+                
+                # Update UI while routing is running
+                routing_progress = 40
+                while not routing_complete and not progress_dlg.WasCancelled():
+                    routing_progress = min(75, routing_progress + 1)
+                    progress_dlg.Update(routing_progress, "Routing in progress...")
+                    
+                    # Check for stop and save request
+                    if hasattr(progress_dlg, 'should_stop_and_save') and progress_dlg.should_stop_and_save:
+                        print("Stop and save requested...")
+                        # Signal the routing thread to stop
+                        if hasattr(self, 'routing_cancelled'):
+                            self.routing_cancelled = True
+                        break
+                    
+                    wx.MilliSleep(200)  # Update every 200ms
+                    wx.GetApp().Yield()  # Keep UI responsive
+                
+                # Check if user cancelled
+                if progress_dlg.WasCancelled():
+                    print("🛑 User cancelled - setting cancellation flag")
+                    self.routing_cancelled = True
+                    # Wait a bit for routing thread to respond to cancellation
+                    wx.MilliSleep(2000)  # Wait 2 seconds
+                    wx.MessageBox("Routing cancelled by user.", "Cancelled", wx.OK | wx.ICON_INFORMATION)
+                    return
+                
+                # Check if user requested stop and save
+                if hasattr(progress_dlg, 'should_stop_and_save') and progress_dlg.should_stop_and_save:
+                    # Wait a bit for routing thread to finish current nets
+                    wx.MilliSleep(1000)
+                    progress_dlg.Update(80, "Stopping and saving current progress...")
+                    print("Stopping and saving current progress...")
+                
+                # Check for routing errors
+                if routing_error:
+                    raise routing_error
+                
+                results = routing_results
                 
                 progress_dlg.Update(80, "Importing routes...")
                 if results['success']:
@@ -170,78 +343,131 @@ Note: Check the PCB editor to see the routed tracks."""
             wx.MessageBox(f"Routing error: {str(e)}", 
                         "Routing Error", wx.OK | wx.ICON_ERROR)
     
-    def _export_board_data(self, board) -> Dict:
+    def _export_board_data(self, board, debug_print=None) -> Dict:
         """Export board data for routing"""
-        # Get board bounds
-        bbox = board.GetBoundingBox()
-        width_nm = int(bbox.GetWidth())
-        height_nm = int(bbox.GetHeight())
+        if debug_print is None:
+            debug_print = print
+            
+        debug_print("🔍 Starting board data export...")
         
-        # Get layer count
-        layer_count = board.GetCopperLayerCount()
-        
-        # Extract nets
-        nets = []
-        
-        # Try different methods to get nets based on KiCad version
         try:
-            # Method 1: Try GetNetlist() (older KiCad)
-            if hasattr(board, 'GetNetlist'):
-                netlist = board.GetNetlist()
-                net_count = netlist.GetNetCount()
-            else:
-                # Method 2: Use GetNetInfo() (newer KiCad)
-                netlist = None
+            # Get layer count first
+            layer_count = board.GetCopperLayerCount()
+            debug_print(f"📚 Copper layers: {layer_count}")
+            
+            # Get net count using the most reliable method
+            try:
                 net_count = board.GetNetCount()
-        except Exception as e:
-            print(f"Error accessing netlist: {e}")
-            # Method 3: Direct iteration through nets
-            netlist = None
-            net_count = board.GetNetCount()
-        
-        print(f"Found {net_count} nets in board")
-        
-        # Extract nets using appropriate method
-        if netlist:
-            # Use netlist object
+                debug_print(f"🔗 Total nets in board: {net_count}")
+            except Exception as e:
+                debug_print(f"❌ Failed to get net count: {e}")
+                net_count = 0
+            
+            if net_count == 0:
+                debug_print("⚠️ No nets found in board!")
+                return {
+                    'bounds': {'width_nm': 100000000, 'height_nm': 100000000, 'layers': layer_count},
+                    'nets': [],
+                    'design_rules': {'min_track_width_nm': 200000, 'min_clearance_nm': 200000, 'min_via_size_nm': 400000}
+                }
+            
+            # STEP 1: Extract ALL nets and collect ALL pins
+            nets = []
+            all_pin_coordinates = []  # Collect coordinates of ALL pins for bounds calculation
+            nets_processed = 0
+            nets_with_pins = 0
+            
+            debug_print("🔍 Collecting all net pins for bounds calculation...")
+            
             for net_code in range(1, net_count):  # Skip net 0 (no net)
-                net_info = netlist.GetNetItem(net_code)
-                if not net_info:
-                    continue
+                try:
+                    net_info = board.GetNetInfo().GetNetItem(net_code)
+                    if not net_info:
+                        continue
+                        
+                    net_name = net_info.GetNetname()
+                    if not net_name or net_name.startswith("unconnected-"):
+                        continue  # Skip unconnected/unnamed nets
                     
-                net_name = net_info.GetNetname()
-                pins = self._extract_pins_for_net(board, net_code)
-                
-                if len(pins) >= 2:  # Only include nets with 2+ pins
-                    nets.append({
-                        'id': net_code,
-                        'name': net_name,
-                        'pins': pins,
-                        'width_nm': 200000  # Default 0.2mm trace width
-                    })
-        else:
-            # Direct method using board nets
-            for net_code in range(1, net_count):
-                net_info = board.GetNetInfo().GetNetItem(net_code)
-                if not net_info:
-                    continue
+                    pins = self._extract_pins_for_net(board, net_code, debug_print)
+                    nets_processed += 1
                     
-                net_name = net_info.GetNetname()
-                pins = self._extract_pins_for_net(board, net_code)
-                
-                if len(pins) >= 2:  # Only include nets with 2+ pins
-                    nets.append({
-                        'id': net_code,
-                        'name': net_name,
-                        'pins': pins,
-                        'width_nm': 200000  # Default 0.2mm trace width
-                    })
+                    if len(pins) >= 2:  # Only include nets with 2+ pins
+                        nets_with_pins += 1
+                        
+                        # Convert pin dictionaries to the format expected by routing engine
+                        formatted_pins = []
+                        for pin in pins:
+                            formatted_pins.append({
+                                'x': pin['x'],  # Keep in nanometers
+                                'y': pin['y'],  # Keep in nanometers
+                                'layer': pin['layer']
+                            })
+                            # Add to coordinate collection for bounds calculation
+                            all_pin_coordinates.append((pin['x'], pin['y']))
+                        
+                        nets.append({
+                            'id': net_code,
+                            'name': net_name,
+                            'pins': formatted_pins,
+                            'width_nm': 200000  # Default 0.2mm trace width
+                        })
+                        debug_print(f"✅ Net {net_code}: '{net_name}' ({len(pins)} pins)")
+                        
+                        # Only show pin coordinates for first 2 nets for debugging
+                        if net_code <= 2:
+                            for i, pin in enumerate(formatted_pins[:2]):
+                                debug_print(f"   Pin {i+1}: ({pin['x']/1e6:.2f}, {pin['y']/1e6:.2f}) mm, layer {pin['layer']}")
+                            
+                    else:
+                        debug_print(f"⏭️ Net {net_code}: '{net_name}' skipped ({len(pins)} pins)")
+                        
+                except Exception as e:
+                    debug_print(f"❌ Error processing net {net_code}: {e}")
+                    continue
+            
+            # STEP 2: Calculate bounds from actual routing pins
+            if not all_pin_coordinates:
+                debug_print("⚠️ No valid pins found for routing!")
+                return {
+                    'bounds': {'width_nm': 100000000, 'height_nm': 100000000, 'layers': layer_count},
+                    'nets': [],
+                    'design_rules': {'min_track_width_nm': 200000, 'min_clearance_nm': 200000, 'min_via_size_nm': 400000}
+                }
+            
+            # Calculate bounds from actual routing pins
+            min_x = min(coord[0] for coord in all_pin_coordinates)
+            min_y = min(coord[1] for coord in all_pin_coordinates)
+            max_x = max(coord[0] for coord in all_pin_coordinates)
+            max_y = max(coord[1] for coord in all_pin_coordinates)
+            
+            width_nm = int(max_x - min_x)
+            height_nm = int(max_y - min_y)
+            
+            debug_print(f"📏 Board size from routing pins: {width_nm/1e6:.1f}mm x {height_nm/1e6:.1f}mm")
+            debug_print(f"📍 Pin coordinate range: X({min_x/1e6:.1f} to {max_x/1e6:.1f}mm), Y({min_y/1e6:.1f} to {max_y/1e6:.1f}mm)")
+            debug_print(f"📊 Found {len(all_pin_coordinates)} total pins in {len(nets)} valid nets")
+            
+            debug_print(f"📊 Export summary:")
+            debug_print(f"   - Nets processed: {nets_processed}")
+            debug_print(f"   - Nets with 2+ pins: {nets_with_pins}")
+            debug_print(f"   - Nets ready for routing: {len(nets)}")
+            
+        except Exception as e:
+            debug_print(f"❌ Critical error in board export: {e}")
+            import traceback
+            debug_print(traceback.format_exc())
+            raise
         
         return {
             'bounds': {
                 'width_nm': width_nm,
                 'height_nm': height_nm,
-                'layers': layer_count
+                'layers': layer_count,
+                'min_x_nm': min_x,
+                'min_y_nm': min_y,
+                'max_x_nm': max_x,
+                'max_y_nm': max_y
             },
             'nets': nets,
             'design_rules': {
@@ -251,43 +477,83 @@ Note: Check the PCB editor to see the routed tracks."""
             }
         }
     
-    def _extract_pins_for_net(self, board, net_code):
+    def _extract_pins_for_net(self, board, net_code, debug_print=None):
         """Extract pins for a specific net, excluding those already connected by filled zones"""
+        if debug_print is None:
+            debug_print = print
+            
         pins = []
         
-        # Find pads connected to this net
-        for module in board.GetFootprints():
-            for pad in module.Pads():
-                if pad.GetNetCode() == net_code:
-                    pos = pad.GetPosition()
-                    layer = pad.GetLayer()
-                    pins.append({
-                        'x': int(pos.x),
-                        'y': int(pos.y),
-                        'layer': 0 if layer == pcbnew.F_Cu else 1,  # Simplified layer mapping
-                        'pad': pad  # Keep reference for zone checking
-                    })
-        
+        try:
+            # Find pads connected to this net
+            footprint_count = 0
+            pad_count = 0
+            
+            for module in board.GetFootprints():
+                footprint_count += 1
+                
+                try:
+                    # Get pads using the most compatible method
+                    if hasattr(module, 'Pads'):
+                        pads = module.Pads()
+                    else:
+                        debug_print(f"❌ Footprint {module.GetReference()} has no Pads() method")
+                        continue
+                        
+                    for pad in pads:
+                        pad_count += 1
+                        
+                        try:
+                            if pad.GetNetCode() == net_code:
+                                pos = pad.GetPosition()
+                                layer = pad.GetLayer()
+                                pins.append({
+                                    'x': int(pos.x),
+                                    'y': int(pos.y),
+                                    'layer': 0 if layer == pcbnew.F_Cu else 1,  # Simplified layer mapping
+                                    'pad': pad  # Keep reference for zone checking
+                                })
+                                
+                        except Exception as e:
+                            debug_print(f"❌ Error processing pad in {module.GetReference()}: {e}")
+                            continue
+                            
+                except Exception as e:
+                    debug_print(f"❌ Error processing footprint {module.GetReference()}: {e}")
+                    continue
+            
+            if net_code <= 5 or len(pins) > 0:  # Debug first few nets or any with pins
+                if len(pins) > 0:
+                    debug_print(f"   Net {net_code}: Found {len(pins)} pins (scanned {footprint_count} footprints)")
+                elif net_code <= 3:  # Only show details for first 3 nets
+                    debug_print(f"   Net {net_code}: Found {len(pins)} pins (scanned {footprint_count} footprints, {pad_count} pads)")
+                
+        except Exception as e:
+            debug_print(f"❌ Critical error in pin extraction for net {net_code}: {e}")
+            import traceback
+            debug_print(traceback.format_exc())
+            
         # Check if pins are already connected by filled zones
         if len(pins) >= 2:
-            connected_groups = self._find_zone_connected_groups(board, pins, net_code)
-            
-            # If all pins are in one connected group, no routing needed
-            if len(connected_groups) <= 1:
-                print(f"Net {net_code}: All pins connected by filled zones, skipping routing")
-                return []  # Return empty list to skip this net
-            
-            # Return representative pins from each group
-            representative_pins = []
-            for group in connected_groups:
-                # Take first pin from each group as representative
-                pin = group[0]
-                representative_pins.append({
-                    'x': pin['x'],
-                    'y': pin['y'], 
-                    'layer': pin['layer']
-                })
-            pins = representative_pins
+            try:
+                connected_groups = self._find_zone_connected_groups(board, pins, net_code)
+                
+                # If all pins are in one connected group, no routing needed
+                if len(connected_groups) <= 1:
+                    debug_print(f"Net {net_code}: All pins connected by filled zones, skipping routing")
+                    return []  # Return empty list to skip this net
+                
+                # Return representative pins from each group
+                result_pins = []
+                for group in connected_groups:
+                    result_pins.append(group[0])  # Take first pin from each group
+                
+                return result_pins
+                
+            except Exception as e:
+                debug_print(f"❌ Error checking zone connections for net {net_code}: {e}")
+                # Fall back to returning all pins if zone checking fails
+                return pins
         
         return pins
     
@@ -316,7 +582,32 @@ Note: Check the PCB editor to see the routed tracks."""
                 pad_pos = pcbnew.VECTOR2I(pin['x'], pin['y'])
                 # Use the appropriate layer (F_Cu or B_Cu based on pin layer)
                 layer = pcbnew.F_Cu if pin['layer'] == 0 else pcbnew.B_Cu
-                if zone.HitTestFilledArea(layer, pad_pos, 0):
+                
+                # Try different KiCad API methods for zone hit testing
+                pin_in_zone = False
+                try:
+                    # Method 1: HitTestFilledArea (newer KiCad)
+                    if hasattr(zone, 'HitTestFilledArea'):
+                        pin_in_zone = zone.HitTestFilledArea(layer, pad_pos, 0)
+                    # Method 2: HitTestInsideZone (older KiCad)  
+                    elif hasattr(zone, 'HitTestInsideZone'):
+                        pin_in_zone = zone.HitTestInsideZone(pad_pos)
+                    # Method 3: GetBoundingBox fallback
+                    else:
+                        bbox = zone.GetBoundingBox()
+                        pin_in_zone = bbox.Contains(pad_pos)
+                        print(f"⚠️ Using fallback zone detection for pin at ({pin['x']}, {pin['y']})")
+                        
+                except Exception as e:
+                    print(f"❌ Zone hit test failed for pin at ({pin['x']}, {pin['y']}): {e}")
+                    # Fallback to bounding box
+                    try:
+                        bbox = zone.GetBoundingBox()
+                        pin_in_zone = bbox.Contains(pad_pos)
+                    except:
+                        pin_in_zone = False
+                
+                if pin_in_zone:
                     zone_pins.append(pin)
                 else:
                     remaining_pins.append(pin)
@@ -398,7 +689,7 @@ class OrthoRouteConfigDialog(wx.Dialog):
         self.config = {
             'grid_pitch_mm': 0.1,
             'max_iterations': 20,
-            'enable_visualization': False,
+            'enable_visualization': True,  # Enable by default for debugging
             'batch_size': 256,
             'via_cost': 10,
             'conflict_penalty': 50
@@ -493,13 +784,62 @@ class OrthoRouteConfigDialog(wx.Dialog):
         
         try:
             import cupy as cp
-            device = cp.cuda.Device()
-            mem_info = device.mem_info
-            total_mem = mem_info[1] / (1024**3)
-            return f"✓ GPU Ready: {device.name}\n  Memory: {total_mem:.1f} GB"
+            
+            # Get device
+            try:
+                device = cp.cuda.Device()
+            except Exception as e:
+                return f"✗ GPU Device Error: {str(e)}"
+            
+            # Get memory info
+            try:
+                mem_info = device.mem_info
+                if callable(mem_info):
+                    mem_info = mem_info()
+                    
+                if isinstance(mem_info, (list, tuple)) and len(mem_info) >= 2:
+                    total_mem = float(mem_info[1]) / (1024**3)
+                else:
+                    total_mem = 0.0
+            except Exception as e:
+                print(f"Memory info error: {e}")
+                total_mem = 0.0
+            
+            # Get device name with multiple fallbacks
+            device_name = "Unknown GPU"
+            try:
+                # Method 1: Use getDeviceProperties (most reliable)
+                device_props = cp.cuda.runtime.getDeviceProperties(device.id)
+                if 'name' in device_props:
+                    name_bytes = device_props['name']
+                    if isinstance(name_bytes, bytes):
+                        device_name = name_bytes.decode('utf-8')
+                    else:
+                        device_name = str(name_bytes)
+                else:
+                    device_name = f"CUDA Device {device.id}"
+                    
+            except Exception as e:
+                print(f"Device properties error: {e}")
+                try:
+                    # Method 2: Fallback to device ID
+                    device_name = f"CUDA Device {device.id}"
+                except Exception as e2:
+                    print(f"Device ID error: {e2}")
+                    device_name = "Unknown GPU Device"
+            
+            # Format the result
+            if total_mem > 0:
+                return f"✓ GPU Ready: {device_name}\n  Memory: {total_mem:.1f} GB"
+            else:
+                return f"✓ GPU Ready: {device_name}\n  Memory: Available"
+                
         except ImportError:
             return "✗ CuPy not available\n  Install CuPy for GPU acceleration"
         except Exception as e:
+            import traceback
+            print(f"GPU info error: {e}")
+            traceback.print_exc()
             return f"✗ GPU Error: {str(e)}"
     
     def get_config(self) -> Dict:
@@ -511,6 +851,88 @@ class OrthoRouteConfigDialog(wx.Dialog):
             'via_cost': self.via_cost_spin.GetValue(),
             'enable_visualization': self.enable_viz_cb.GetValue()
         }
+    
+    def _get_board_bounds(self, board):
+        """Get board bounding box for visualization"""
+        try:
+            bbox = board.GetBoardEdgesBoundingBox()
+            return [
+                float(bbox.GetX()) / 1e6,  # Convert to mm
+                float(bbox.GetY()) / 1e6,
+                float(bbox.GetWidth()) / 1e6,
+                float(bbox.GetHeight()) / 1e6
+            ]
+        except:
+            return [0, 0, 100, 80]  # Default board size
+    
+    def _get_board_pads(self, board):
+        """Get pad information for visualization"""
+        pads = []
+        try:
+            footprint_count = 0
+            pad_count = 0
+            
+            for footprint in board.GetFootprints():
+                footprint_count += 1
+                footprint_pads = 0
+                
+                for pad in footprint.Pads():
+                    try:
+                        bbox = pad.GetBoundingBox()
+                        pos = pad.GetPosition()
+                        
+                        pad_data = {
+                            'bounds': [
+                                float(bbox.GetX()) / 1e6,  # Convert to mm
+                                float(bbox.GetY()) / 1e6,
+                                float(bbox.GetWidth()) / 1e6,
+                                float(bbox.GetHeight()) / 1e6
+                            ],
+                            'center': [
+                                float(pos.x) / 1e6,  # Pad center in mm
+                                float(pos.y) / 1e6
+                            ],
+                            'net': pad.GetNetname(),
+                            'ref': footprint.GetReference()
+                        }
+                        pads.append(pad_data)
+                        pad_count += 1
+                        footprint_pads += 1
+                        
+                    except Exception as e:
+                        print(f"Error processing pad in {footprint.GetReference()}: {e}")
+                
+                # Debug for first few footprints
+                if footprint_count <= 3:
+                    print(f"   Footprint {footprint.GetReference()}: {footprint_pads} pads")
+                        
+            print(f"📍 Pad extraction: {footprint_count} footprints, {pad_count} total pads")
+            
+        except Exception as e:
+            print(f"Error getting pads: {e}")
+            
+        return pads
+    
+    def _get_board_obstacles(self, board):
+        """Get obstacle information for visualization"""
+        obstacles = []
+        try:
+            # Get existing tracks as obstacles
+            for track in board.GetTracks():
+                if hasattr(track, 'GetBoundingBox'):
+                    bbox = track.GetBoundingBox()
+                    obstacles.append({
+                        'bounds': [
+                            float(bbox.GetX()) / 1e6,
+                            float(bbox.GetY()) / 1e6,
+                            float(bbox.GetWidth()) / 1e6,
+                            float(bbox.GetHeight()) / 1e6
+                        ],
+                        'type': 'track'
+                    })
+        except Exception as e:
+            print(f"Error getting obstacles: {e}")
+        return obstacles
 
 
 # Register the plugin

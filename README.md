@@ -69,7 +69,7 @@ pip install cupy-cuda12x
 pip install cupy-cuda11x
 
 # Verify installation
-python -c "import cupy as cp; print(f'GPU: {cp.cuda.Device().name}')"
+python -c "import cupy as cp; device = cp.cuda.Device(); props = cp.cuda.runtime.getDeviceProperties(device.id); print(f'GPU: {props[\"name\"].decode(\"utf-8\")}')"
 ```
 
 **Note**: OrthoRoute works without GPU acceleration using CPU fallback mode.
@@ -261,7 +261,7 @@ python install_dev.py
 #### 🐍 CuPy/CUDA Issues
 ```bash
 # Test GPU availability
-python -c "import cupy as cp; print('GPU detected:', cp.cuda.Device().name)"
+python -c "import cupy as cp; device = cp.cuda.Device(); props = cp.cuda.runtime.getDeviceProperties(device.id); print('GPU detected:', props['name'].decode('utf-8'))"
 
 # Common fixes:
 pip uninstall cupy-cuda12x cupy-cuda11x
@@ -298,7 +298,9 @@ try:
     import cupy as cp
     print(f'CuPy: {cp.__version__}')
     print(f'CUDA: {cp.cuda.runtime.runtimeGetVersion()}')
-    print(f'GPU: {cp.cuda.Device().name}')
+    device = cp.cuda.Device()
+    props = cp.cuda.runtime.getDeviceProperties(device.id)
+    print(f'GPU: {props[\"name\"].decode(\"utf-8\")}')
     print('✅ GPU acceleration available')
 except ImportError:
     print('⚠️  CPU mode only (CuPy not found)')
