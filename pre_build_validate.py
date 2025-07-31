@@ -58,11 +58,11 @@ def analyze_python_file(file_path):
 
 def validate_plugin_structure():
     """Validate the plugin package structure and contents"""
-    print("📦 Validating OrthoRoute plugin structure...")
+    print("[PACKAGE] Validating OrthoRoute plugin structure...")
     
     addon_dir = Path(__file__).parent / "addon_package"
     if not addon_dir.exists():
-        print("❌ addon_package directory not found")
+        print("[ERROR] addon_package directory not found")
         return False
     
     # Check required files
@@ -81,10 +81,10 @@ def validate_plugin_structure():
         full_path = addon_dir / file_path
         if not full_path.exists():
             missing_files.append(file_path)
-            print(f"❌ Missing: {file_path} ({description})")
+            print(f"[ERROR] Missing: {file_path} ({description})")
         else:
             size = full_path.stat().st_size
-            print(f"✅ Found: {file_path} ({size:,} bytes)")
+            print(f"[OK] Found: {file_path} ({size:,} bytes)")
             
             # Analyze Python files
             if file_path.endswith('.py'):
@@ -95,51 +95,51 @@ def validate_plugin_structure():
                     classes = len(analysis['classes'])
                     functions = len(analysis['functions'])
                     lines = analysis['lines']
-                    print(f"   📋 {lines:,} lines, {classes} classes, {functions} functions")
+                    print(f"   [INFO] {lines:,} lines, {classes} classes, {functions} functions")
                 else:
-                    print(f"   ❌ {analysis['error']}")
+                    print(f"   [ERROR] {analysis['error']}")
                     return False
     
     if missing_files:
-        print(f"❌ Missing {len(missing_files)} required files")
+        print(f"[ERROR] Missing {len(missing_files)} required files")
         return False
     
     # Validate main plugin components
     main_plugin = file_analysis.get('plugins/__init__.py', {})
     if main_plugin.get('valid'):
         if 'OrthoRoutePlugin' in main_plugin['classes']:
-            print("✅ Main plugin class found")
+            print("[OK] Main plugin class found")
         else:
-            print("⚠️  Main plugin class not found (expected 'OrthoRoutePlugin')")
+            print("[WARN] Main plugin class not found (expected 'OrthoRoutePlugin')")
     
     engine = file_analysis.get('plugins/orthoroute_engine.py', {})
     if engine.get('valid'):
         engine_functions = engine['functions']
         if any('route' in func.lower() for func in engine_functions):
-            print("✅ Routing functions found in engine")
+            print("[OK] Routing functions found in engine")
         else:
-            print("⚠️  No routing functions found in engine")
+            print("[WARN] No routing functions found in engine")
     
     api_bridge = file_analysis.get('plugins/api_bridge.py', {})
     if api_bridge.get('valid'):
         bridge_functions = api_bridge['functions']
         if 'detect_api_type' in bridge_functions:
-            print("✅ API detection function found")
+            print("[OK] API detection function found")
         else:
-            print("⚠️  API detection function not found")
+            print("[WARN] API detection function not found")
     
-    print("✅ Plugin structure validation passed")
+    print("[OK] Plugin structure validation passed")
     return True
 
 def validate_metadata():
     """Validate the metadata.json file"""
-    print("📋 Validating package metadata...")
+    print("[METADATA] Validating package metadata...")
     
     import json
     
     metadata_path = Path(__file__).parent / "addon_package" / "metadata.json"
     if not metadata_path.exists():
-        print("❌ metadata.json not found")
+        print("[ERROR] metadata.json not found")
         return False
     
     try:
@@ -154,43 +154,43 @@ def validate_metadata():
                 # Check if version is in versions array
                 if field == 'version' and 'versions' in metadata:
                     if metadata['versions'] and 'version' in metadata['versions'][0]:
-                        print(f"✅ {field}: {metadata['versions'][0]['version']} (from versions array)")
+                        print(f"[OK] {field}: {metadata['versions'][0]['version']} (from versions array)")
                         continue
                 missing_fields.append(field)
             else:
                 value = metadata[field]
-                print(f"✅ {field}: {value}")
+                print(f"[OK] {field}: {value}")
         
         if missing_fields:
-            print(f"❌ Missing metadata fields: {missing_fields}")
+            print(f"[ERROR] Missing metadata fields: {missing_fields}")
             return False
         
         # Additional validations
         if metadata.get('type') != 'plugin':
-            print(f"⚠️  Unexpected type: {metadata.get('type')} (expected 'plugin')")
+            print(f"[WARN] Unexpected type: {metadata.get('type')} (expected 'plugin')")
         
         if 'orthoroute' not in metadata.get('identifier', '').lower():
-            print(f"⚠️  Identifier doesn't contain 'orthoroute': {metadata.get('identifier')}")
+            print(f"[WARN] Identifier doesn't contain 'orthoroute': {metadata.get('identifier')}")
         
-        print("✅ Metadata validation passed")
+        print("[OK] Metadata validation passed")
         return True
         
     except json.JSONDecodeError as e:
-        print(f"❌ Invalid JSON in metadata.json: {e}")
+        print(f"[ERROR] Invalid JSON in metadata.json: {e}")
         return False
     except Exception as e:
-        print(f"❌ Metadata validation error: {e}")
+        print(f"[ERROR] Metadata validation error: {e}")
         return False
 
 def validate_imports():
     """Validate that plugin files can be imported (without KiCad APIs)"""
-    print("🔧 Validating plugin imports (syntax check)...")
+    print("[IMPORT] Validating plugin imports (syntax check)...")
     
     plugin_dir = Path(__file__).parent / "addon_package" / "plugins"
     python_files = list(plugin_dir.glob("*.py"))
     
     if not python_files:
-        print("❌ No Python files found in plugins directory")
+        print("[ERROR] No Python files found in plugins directory")
         return False
     
     success_count = 0
@@ -205,21 +205,21 @@ def validate_imports():
                 source = f.read()
             
             compile(source, str(py_file), 'exec')
-            print(f"✅ {py_file.name}: Syntax valid")
+            print(f"[OK] {py_file.name}: Syntax valid")
             success_count += 1
             
         except SyntaxError as e:
-            print(f"❌ {py_file.name}: Syntax error at line {e.lineno}: {e.msg}")
+            print(f"[ERROR] {py_file.name}: Syntax error at line {e.lineno}: {e.msg}")
             return False
         except Exception as e:
-            print(f"⚠️  {py_file.name}: Compile issue: {e}")
+            print(f"[WARN] {py_file.name}: Compile issue: {e}")
     
-    print(f"✅ {success_count} plugin files validated")
+    print(f"[OK] {success_count} plugin files validated")
     return success_count > 0
 
 def check_package_size():
     """Check if the package will be a reasonable size"""
-    print("📏 Checking package size...")
+    print("[SIZE] Checking package size...")
     
     addon_dir = Path(__file__).parent / "addon_package"
     total_size = 0
@@ -232,21 +232,21 @@ def check_package_size():
             file_count += 1
     
     size_kb = total_size / 1024
-    print(f"✅ Package contents: {file_count} files, {size_kb:.1f} KB")
+    print(f"[OK] Package contents: {file_count} files, {size_kb:.1f} KB")
     
     if size_kb > 200:
-        print(f"⚠️  Large package size ({size_kb:.1f} KB) - consider optimization")
+        print(f"[WARN] Large package size ({size_kb:.1f} KB) - consider optimization")
     elif size_kb < 10:
-        print(f"⚠️  Very small package ({size_kb:.1f} KB) - may be incomplete")
+        print(f"[WARN] Very small package ({size_kb:.1f} KB) - may be incomplete")
     else:
-        print(f"✅ Package size is reasonable")
+        print(f"[OK] Package size is reasonable")
     
     return True
 
 def main():
     """Run all pre-build validations"""
     print("=" * 70)
-    print("🔍 OrthoRoute Pre-Build Validation")
+    print("[DEBUG] OrthoRoute Pre-Build Validation")
     print("=" * 70)
     
     tests = [
@@ -263,17 +263,17 @@ def main():
             results.append((test_name, result))
             print()
         except Exception as e:
-            print(f"❌ {test_name} failed with exception: {e}")
+            print(f"[ERROR] {test_name} failed with exception: {e}")
             results.append((test_name, False))
             print()
     
     print("=" * 70)
-    print("📊 PRE-BUILD VALIDATION SUMMARY")
+    print("[SUMMARY] PRE-BUILD VALIDATION SUMMARY")
     print("=" * 70)
     
     passed = 0
     for test_name, result in results:
-        status = "✅ PASS" if result else "❌ FAIL"
+        status = "[PASS]" if result else "[FAIL]"
         print(f"{test_name:20} {status}")
         if result:
             passed += 1
@@ -281,18 +281,18 @@ def main():
     print(f"\\nResult: {passed}/{len(results)} validations passed")
     
     if passed == len(results):
-        print("🎉 ALL VALIDATIONS PASSED")
-        print("✅ Plugin is ready for packaging!")
-        print("\\n📦 To build the package:")
+        print("[SUCCESS] ALL VALIDATIONS PASSED")
+        print("[OK] Plugin is ready for packaging!")
+        print("\\n[INFO] To build the package:")
         print("   python build_addon.py")
         return True
     elif passed >= len(results) - 1:
-        print("✅ MOSTLY READY")
-        print("⚠️  Minor issues detected, but package should work")
+        print("[OK] MOSTLY READY")
+        print("[WARN] Minor issues detected, but package should work")
         return True
     else:
-        print("❌ VALIDATION FAILURES")
-        print("🛑 Fix issues before packaging")
+        print("[ERROR] VALIDATION FAILURES")
+        print("[STOP] Fix issues before packaging")
         return False
 
 if __name__ == "__main__":

@@ -1,3 +1,15 @@
+<table width="100%">
+  <tr>
+    <td align="left" width="200">
+      <img src="/Assets/icon200.png" alt="OpenCut Logo" width="200" />
+    </td>
+    <td align="right">
+      <h1>OrthoRoute</h1>
+      <h3 style="margin-top: -10px;">A high-performance GPU-accelerated autorouter plugin for KiCad</h3>
+    </td>
+  </tr>
+</table>
+
 
 ![Repo logo](/Assets/icon200.png)
 
@@ -42,7 +54,7 @@ OrthoRoute/
 
 ### Quick Install (Recommended)
 
-1. **Download** the `orthoroute-kicad-addon.zip` file (52.9KB)
+1. **Download** the `orthoroute-kicad-addon.zip` file (104.4KB)
 2. **Open KiCad PCB Editor**
 3. **Go to Tools → Plugin and Content Manager**
 4. **Click "Install from File"**
@@ -137,17 +149,17 @@ python development/testing/headless/test_kicad_cli.py
 ## Project Structure
 
 ```
-OrthoRoute/                          # 🚀 Clean, organized project structure
-├── addon_package/                   # 📦 Production KiCad addon (49.2KB optimized)
+OrthoRoute/                          # Clean, organized project structure
+├── addon_package/                   # Production KiCad addon (49.2KB optimized)
 │   ├── metadata.json               # Package metadata for KiCad PCM
 │   ├── plugins/                    # Main plugin implementation
-│   │   ├── __init__.py             # Plugin entry point (15.4KB)
+│   │   ├── __init__.py             # Plugin entry point (67.3KB)
 │   │   ├── orthoroute_engine.py    # GPU routing engine (50.0KB)
 │   │   └── icon.png                # Toolbar icon (24x24)
 │   ├── resources/                  # Package resources
 │   │   └── icon.png                # Package manager icon (64x64)
 │   └── README.md                   # Package documentation
-├── development/                     # 🛠️ Development files (organized)
+├── development/                     # Development files (organized)
 │   ├── documentation/              # Extended documentation
 │   │   ├── api_reference.md        # API documentation
 │   │   ├── contributing.md         # Contribution guidelines
@@ -162,7 +174,7 @@ OrthoRoute/                          # 🚀 Clean, organized project structure
 │   │   ├── integration/            # End-to-end tests
 │   │   └── run_all_tests.py        # Test runner
 │   └── deprecated/                 # Legacy code archive
-├── orthoroute/                     # 🔧 Core routing library
+├── orthoroute/                     # Core routing library
 │   ├── __init__.py                 # Library interface
 │   ├── gpu_engine.py               # CUDA/CuPy acceleration
 │   ├── grid_manager.py             # Routing grid management
@@ -170,7 +182,7 @@ OrthoRoute/                          # 🚀 Clean, organized project structure
 │   ├── standalone_wave_router.py   # Standalone router
 │   ├── visualization.py            # Routing visualization
 │   └── wave_router.py              # Wave propagation
-├── tests/                          # 🧪 Legacy test suite (maintained)
+├── tests/                          # Legacy test suite (maintained)
 │   ├── conftest.py                 # Test configuration
 │   ├── integration_tests.py        # End-to-end tests
 │   ├── test_gpu_engine_mock.py     # GPU engine testing
@@ -178,7 +190,7 @@ OrthoRoute/                          # 🚀 Clean, organized project structure
 │   ├── test_plugin_registration.py # Plugin registration tests
 │   ├── test_utils.py               # Testing utilities
 │   └── verify_plugin.py            # Plugin verification
-├── Assets/                         # 🎨 Icons and graphics
+├── assets/                         # Icons and graphics
 │   ├── BigIcon.png                 # Large project icon
 │   ├── icon200.png                 # Medium icon (README)
 │   ├── icon64.png                  # Standard icon
@@ -189,7 +201,7 @@ OrthoRoute/                          # 🚀 Clean, organized project structure
 │   └── installation.md             # Installation guide
 ├── build_addon.py                  # 📦 Package builder
 ├── install_dev.py                  # 🔧 Development installer
-├── orthoroute-kicad-addon.zip      # 📦 Release package (49.2KB)
+├── orthoroute-kicad-addon.zip      # 📦 Release package (63.6KB)
 ├── README.md                       # 📖 This file
 ├── TESTING_SUMMARY.md              # 🧪 Testing overview
 ├── WORKSPACE_CLEANUP.md            # 🧹 Cleanup documentation
