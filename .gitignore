@@ -58,9 +58,23 @@ htmlcov/
 .nox/
 
 # Project specific
+# Archive directory for old development files
+archive/
+
 # Large test board files
 tests/benchmark_boards/*.json
 tests/benchmark_boards/*.kicad_pcb
+
+# Debug and temporary files
+*debug*.txt
+*debug*.log
+orthoroute_*.py
+crash_*.py
+test_*.py
+simple_*.py
+standalone_*.py
+quick_*.py
+*temp*.py
 
 # GPU profiling outputs
 *.nvvp
