@@ -620,10 +620,27 @@ For more details, visit: https://docs.cupy.dev/en/stable/install.html"""
                 
                 results = routing_results
                 
-                progress_dlg.Update(80, "Importing routes...")
+                progress_dlg.Update(80, "Finalizing routes...")
                 if results['success']:
-                    print("Importing routes...")
-                    self._import_routes(board, results)
+                    # Check if tracks were created directly (GPU routing)
+                    if results.get('tracks_created_directly', False):
+                        print("✅ Routes already created directly by GPU - finalizing...")
+                        progress_dlg.Update(90, "Refreshing board display...")
+                        
+                        # Force board refresh to show new tracks
+                        try:
+                            import pcbnew
+                            board_editor = pcbnew.GetBoard()
+                            if board_editor:
+                                board_editor.BuildListOfNets()
+                                print("📋 Board nets rebuilt successfully")
+                        except Exception as e:
+                            print(f"⚠ Board refresh warning: {str(e)}")
+                            
+                    else:
+                        print("Importing routes from results...")
+                        self._import_routes(board, results)
+                    
                     progress_dlg.Update(100, "Routing complete!")
                     
                     # Show results
@@ -913,14 +930,36 @@ Note: Check the PCB editor to see the routed tracks."""
                     debug_print(f"❌ Immediate dialog failed: {str(e)}")
             
             debug_print("🏁 Plugin execution completed")
-            return routed_count > 0
+            
+            # Return proper results dictionary for threading system
+            return {
+                'success': routed_count > 0,
+                'tracks_created_directly': True,  # Signal that tracks are already in KiCad
+                'stats': {
+                    'total_nets': len(routeable_nets),
+                    'successful_nets': routed_count,
+                    'failed_nets': failed_count,
+                    'success_rate': (routed_count / len(routeable_nets)) * 100 if routeable_nets else 0
+                },
+                'message': f"GPU routing completed: {routed_count}/{len(routeable_nets)} nets routed"
+            }
             
         except Exception as e:
             debug_print(f"❌ ERROR in GPU routing: {str(e)}")
             import traceback
             debug_print(traceback.format_exc())
             wx.MessageBox(f"GPU routing failed: {str(e)}", "Error", wx.OK | wx.ICON_ERROR)
-            return False
+            return {
+                'success': False,
+                'error': str(e),
+                'stats': {
+                    'total_nets': 0,
+                    'successful_nets': 0,
+                    'failed_nets': 0,
+                    'success_rate': 0
+                },
+                'message': f"GPU routing failed: {str(e)}"
+            }
     
     def _route_net_gpu(self, board, net_info, pads, debug_print, cp):
         """
