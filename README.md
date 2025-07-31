@@ -10,12 +10,9 @@
   </tr>
 </table>
 
+OrthoRoute is a high-performance GPU-accelerated autorouter plugin for KiCad that revolutionizes PCB routing through parallel processing. By implementing Lee's algorithm (wavefront propagation) on NVIDIA GPUs using CUDA/CuPy, OrthoRoute achieves 10-100x faster routing compared to traditional CPU-based autorouters.
 
-![Repo logo](/Assets/icon200.png)
-
-# OrthoRoute - KiCad GPU-Accelerated Autorouter
-
-OrthoRoute is a high-performance GPU-accelerated autorouter plugin for KiCad, implementing wave propagation algorithms with CUDA acceleration for faster PCB routing.
+The plugin transforms the traditionally sequential routing process into a massively parallel operation, processing thousands of routing grid cells simultaneously on the GPU. This approach dramatically reduces routing time from minutes or hours to seconds, while maintaining optimal path finding and respecting design rules. OrthoRoute seamlessly integrates with KiCad's existing workflow, requiring no external tools or complex setup - simply install the plugin and leverage your GPU's computational power for lightning-fast PCB autorouting.
 
 ## Features
 
