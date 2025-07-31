@@ -1,7 +1,7 @@
 <table width="100%">
   <tr>
-    <td align="right" width="200">
-      <img src="/Assets/icon200.png" alt="OpenCut Logo" width="200" />
+    <td align="right" width="300">
+      <img src="/Assets/icon200.png" alt="OpenCut Logo" width="300" />
     </td>
     <td align="left">
       <h1>OrthoRoute</h1>

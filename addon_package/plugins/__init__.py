@@ -35,8 +35,24 @@ class OrthoRouteDebugDialog(wx.Dialog):
         self.Centre()
         
     def append_text(self, text):
-        """Add text to debug output"""
+        """Add text to debug output with overflow protection"""
+        # Limit text length to prevent crashes
+        current_text = self.text_ctrl.GetValue()
+        if len(current_text) > 100000:  # 100KB limit
+            # Keep only last 50KB of text
+            lines = current_text.split('\n')
+            self.text_ctrl.SetValue('\n'.join(lines[-1000:]) + '\n[... previous content truncated ...]\n')
+        
         self.text_ctrl.AppendText(text + "\n")
+        
+        # Auto-scroll to bottom but only occasionally to prevent UI lag
+        if hasattr(self, '_scroll_count'):
+            self._scroll_count += 1
+        else:
+            self._scroll_count = 1
+            
+        if self._scroll_count % 5 == 0:  # Scroll every 5 messages
+            self.text_ctrl.SetInsertionPointEnd()
 
 class OrthoRouteKiCadPlugin(pcbnew.ActionPlugin):
     """KiCad plugin for OrthoRoute GPU autorouter"""
@@ -224,9 +240,18 @@ For more details, visit: https://docs.cupy.dev/en/stable/install.html"""
             debug_dialog.Show()
             
             def debug_print(msg):
-                """Print to both console and debug dialog with buffering"""
+                """Print to both console and debug dialog with buffering and overflow protection"""
                 print(msg)
+                
+                # Check dialog text length to prevent overflow crashes
+                current_text = debug_text.GetValue()
+                if len(current_text) > 100000:  # 100KB limit
+                    # Keep only last 50KB of text
+                    lines = current_text.split('\n')
+                    debug_text.SetValue('\n'.join(lines[-1000:]) + '\n[... previous content truncated ...]\n')
+                
                 debug_text.AppendText(msg + "\n")
+                
                 # Only update UI every 10 messages or on important messages
                 if hasattr(debug_print, '_msg_count'):
                     debug_print._msg_count += 1
@@ -235,7 +260,10 @@ For more details, visit: https://docs.cupy.dev/en/stable/install.html"""
                     
                 if (debug_print._msg_count % 10 == 0 or 
                     any(keyword in msg for keyword in ['✅', '❌', '📊', '🚀', '🔍'])):
-                    wx.SafeYield()  # Update UI only occasionally
+                    try:
+                        wx.SafeYield()  # Update UI only occasionally
+                    except:
+                        pass  # Ignore yield errors
             
             debug_print("🔍 OrthoRoute Debug Output")
             debug_print("=" * 40)
