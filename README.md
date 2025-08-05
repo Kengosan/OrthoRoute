@@ -1,6 +1,6 @@
 <table width="100%">
   <tr>
-    <td align="right" width="300">
+    <td align="right" width="400">
       <img src="/Assets/icon200.png" alt="OpenCut Logo" width="300" />
     </td>
     <td align="left">
