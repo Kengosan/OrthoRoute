@@ -1,4 +1,22 @@
-kicad-python>=0.4.0
-cupy-cuda12x>=12.0.0
+# OrthoRoute GPU Autorouter Requirements
+# Core dependencies for the Qt-based IPC plugin
+
+# Qt GUI framework
+PyQt6>=6.4.0
+PyQt6-Qt6>=6.4.0
+
+# OpenGL support for visualization
+PyOpenGL>=3.1.0
+PyOpenGL-accelerate>=3.1.0
+
+# Scientific computing
 numpy>=1.21.0
-matplotlib>=3.5.0
+
+# KiCad IPC API (install via: pip install kicad-python)
+# kicad-python>=1.0.0
+
+# GPU acceleration (optional - install via: pip install cupy-cuda12x)
+# cupy-cuda12x>=12.0.0
+
+# Standard library dependencies (usually included)
+# json, logging, sys, os, pathlib, subprocess, tempfile, time, typing

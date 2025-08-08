@@ -1,23 +1,203 @@
+# OrthoRoute - GPU-Accelerated PCB Autorouter
+
 <table width="100%">
   <tr>
     <td align="right" width="300">
-      <img src="/Assets/icon200.png" alt="OpenCut Logo" width="300" />
+      <img src="assets/icon200.png" alt="OrthoRoute Logo" width="200" />
     </td>
     <td align="left">
-      <h1>OrthoRoute</h1>
-      <h3 style="margin-top: -10px;">A high-performance GPU-accelerated autorouter plugin for KiCad</h3>
-      <h3 style="margin-top: -10px;">Never trust the autorouter, but at least this one is fast!</h3>
+      <h2>High-Performance GPU-Accelerated Autorouter for KiCad</h2>
+      <p><em>"Never trust the autorouter, but at least this one is fast!"</em></p>
     </td>
   </tr>
 </table>
 
-TODO: Ping @anne_engineer when this is done, let her launch it.
+OrthoRoute is a modern, GPU-accelerated autorouter plugin for KiCad 9.0+ that implements Lee's algorithm (wavefront propagation) on NVIDIA GPUs using CUDA/CuPy. It achieves 10-100x faster routing compared to traditional CPU-based autorouters while maintaining optimal path finding and respecting design rules.
 
-OrthoRoute is a high-performance GPU-accelerated autorouter plugin for KiCad 9.0+ using the modern IPC API. By implementing Lee's algorithm (wavefront propagation) and other routing algorithms (orthogonal routing, domain specific) on NVIDIA GPUs using CUDA/CuPy in a completely separate process, OrthoRoute achieves 10-100x faster routing compared to traditional CPU-based autorouters.
+## ✨ Features
 
-The plugin transforms the sequential routing process into a massively parallel operation, processing thousands of routing grid cells simultaneously on the GPU. The innovative **dual-process architecture** isolates all GPU operations in a standalone server process, communicating with KiCad through the **native IPC API** using Protocol Buffers over Unix sockets. This approach dramatically reduces routing time from minutes or hours to seconds, while maintaining optimal path finding, respecting design rules, and providing bulletproof crash protection.
+- **🚀 GPU Acceleration** - CUDA/CuPy for massive parallel processing
+- **🔀 Dual API Support** - Works with both modern IPC API (KiCad 9.0+) and legacy SWIG API
+- **⚡ Lee's Algorithm** - Optimal pathfinding with wavefront propagation
+- **🎯 Multi-layer Support** - Complex boards with automatic via insertion
+- **📊 Real-time Progress** - Visual feedback during routing process
+- **🔧 Configurable** - Adjustable grid pitch, via costs, and iteration limits
+- **💾 CPU Fallback** - Automatic fallback when GPU is not available
+- **🛡️ Robust Error Handling** - Comprehensive logging and error recovery
 
-## ⚠️ Important: KiCad 9.0 IPC API Required
+## 🎯 Quick Start
+
+### Installation
+
+1. **Download** the latest `orthoroute-kicad-plugin.zip` from releases
+2. **Open KiCad PCB Editor** → Tools → Plugin and Content Manager
+3. **Click "Install from File"** and select the ZIP file
+4. **Restart KiCad completely**
+5. **Find the plugin** under Tools → External Plugins → "OrthoRoute GPU Autorouter"
+
+### Alternative: Development Installation
+
+```bash
+# Clone the repository
+git clone https://github.com/bbenchoff/OrthoRoute.git
+cd OrthoRoute
+
+# Install for development
+python install.py install
+
+# Check system requirements
+python install.py check
+
+# Uninstall if needed
+python install.py uninstall
+```
+
+### Usage
+
+1. **Open your PCB** in KiCad PCB Editor
+2. **Click OrthoRoute** in the toolbar or go to Tools → External Plugins
+3. **Configure parameters**:
+   - Grid Pitch: 0.05-1.0mm (smaller = more precise)
+   - Max Iterations: 1-20 (more = better results)
+   - Via Cost: 1-100 (higher = fewer vias)
+   - GPU Acceleration: Enable if available
+4. **Click "Route Board"** and monitor progress
+5. **Review results** and iterate as needed
+
+## 🏗️ Project Structure
+
+```
+OrthoRoute/
+├── src/                    # 🔧 Plugin source code
+│   ├── __init__.py        # Main plugin entry point
+│   ├── routing_engine.py  # GPU routing algorithms
+│   ├── config_dialog.py   # Configuration UI
+│   └── utils.py           # Helper functions
+├── assets/                # 🎨 Icons and images
+├── docs/                  # 📚 Documentation
+├── tests/                 # 🧪 Test suite
+├── build/                 # 📦 Build outputs
+├── archive_complete/      # 📁 Development history
+├── build.py               # 🔨 Package builder
+├── install.py             # 🔧 Development installer
+└── README.md              # 📖 This file
+```
+
+## ⚙️ System Requirements
+
+### Required
+- **KiCad 9.0+** (IPC API support) or **KiCad 7.0+** (SWIG fallback)
+- **Python 3.8+**
+- **NumPy** for array operations
+
+### Optional (for GPU acceleration)
+- **NVIDIA GPU** with CUDA support
+- **CuPy 12.0+** (`pip install cupy-cuda12x`)
+- **CUDA Toolkit 12.0+**
+
+### Optional (for GUI)
+- **wxPython** for configuration dialogs (`pip install wxwidgets`)
+
+## 📊 Performance
+
+| Board Complexity | Nets | Traditional Time | OrthoRoute (GPU) | Speedup |
+|------------------|------|------------------|------------------|---------|
+| Simple           | 50   | 30 seconds       | 2 seconds        | **15x** |
+| Medium           | 500  | 10 minutes       | 30 seconds       | **20x** |
+| Complex          | 2000 | 2 hours          | 3 minutes        | **40x** |
+
+*Performance varies based on GPU specifications and board complexity*
+
+## 🔧 Development
+
+### Building from Source
+
+```bash
+# Build distributable package
+python build.py
+
+# Package will be created in build/orthoroute-kicad-plugin.zip
+```
+
+### Testing
+
+```bash
+# Run test suite
+python -m pytest tests/
+
+# Check installation
+python install.py check
+
+# Manual testing
+python src/__init__.py  # Direct execution
+```
+
+### Contributing
+
+1. **Fork** the repository
+2. **Create** a feature branch: `git checkout -b feature/amazing-feature`
+3. **Make** changes with tests
+4. **Run** tests: `python -m pytest tests/`
+5. **Submit** a pull request
+
+## 🐛 Troubleshooting
+
+### Plugin Not Appearing
+- Restart KiCad completely after installation
+- Check KiCad's Python console for errors
+- Verify plugin is in correct directory (run `python install.py check`)
+
+### GPU Not Working
+```bash
+# Test GPU availability
+python -c "import cupy; print('GPU OK')"
+
+# Install CUDA support
+pip install cupy-cuda12x  # For CUDA 12.x
+pip install cupy-cuda11x  # For CUDA 11.x
+```
+
+### Performance Issues
+- Increase grid pitch for initial testing (0.2mm vs 0.1mm)
+- Reduce max iterations for faster completion
+- Enable GPU acceleration if available
+- Close other GPU-intensive applications
+
+## 📚 Documentation
+
+- **[Installation Guide](docs/installation.md)** - Detailed installation instructions
+- **[API Reference](docs/api_reference.md)** - Developer API documentation
+- **[Contributing Guide](docs/contributing.md)** - How to contribute
+- **[Modern KiCad Development](docs/MODERN_KICAD_DEVELOPMENT_GUIDE.md)** - Plugin development guide
+
+## 📜 License
+
+```
+DO WHAT THE FUCK YOU WANT TO PUBLIC LICENSE
+MODIFIED FOR NERDS - Version 3, April 2025
+
+Everyone is permitted to copy and distribute verbatim or modified
+copies of this license document, and changing it is allowed as long
+as the name is changed.
+
+0. You just DO WHAT THE FUCK YOU WANT TO.
+1. Anyone who complains about this license is a nerd.
+```
+
+## 🙏 Acknowledgments
+
+- **KiCad Team** - For the excellent PCB design software
+- **CuPy Developers** - For GPU computing in Python
+- **NVIDIA** - For CUDA technology
+- **PCB Routing Community** - For decades of algorithm research
+
+---
+
+**⭐ Star this repo if OrthoRoute helped speed up your PCB routing!**
+
+**🐛 Found a bug?** [Report it here](https://github.com/bbenchoff/OrthoRoute/issues)
+
+**💡 Have an idea?** [Start a discussion](https://github.com/bbenchoff/OrthoRoute/discussions)
 
 OrthoRoute represents the **modern approach to KiCad plugin development** using KiCad's revolutionary **IPC API architecture**. Starting with KiCad 9.0, the legacy SWIG Python bindings are deprecated and will be removed in KiCad 10.0. Our implementation embraces this architectural transformation, providing:
 

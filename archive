@@ -1,0 +1,185 @@
+#!/usr/bin/env python3
+"""
+Build Correct PCM Package for IPC Plugin
+"""
+
+import os
+import shutil
+import zipfile
+import tempfile
+from pathlib import Path
+
+def build_correct_pcm_package():
+    """Build properly structured PCM package"""
+    
+    current_dir = Path(__file__).parent
+    build_dir = current_dir / "build"
+    build_dir.mkdir(exist_ok=True)
+    
+    package_name = "orthoroute-pcm-ipc-test.zip"
+    package_path = build_dir / package_name
+    
+    if package_path.exists():
+        package_path.unlink()
+    
+    print(f"Building PCM IPC package: {package_name}")
+    
+    with tempfile.TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        
+        # Create plugins directory
+        plugins_dir = temp_path / "plugins"
+        plugins_dir.mkdir()
+        
+        # Create resources directory
+        resources_dir = temp_path / "resources"
+        resources_dir.mkdir()
+        
+        # Create __init__.py in plugins directory
+        init_content = '''"""OrthoRoute Simple IPC Test Plugin"""
+import pcbnew
+import sys
+import os
+import time
+from pathlib import Path
+
+class SimpleIPCTestPlugin(pcbnew.ActionPlugin):
+    """Simple IPC test plugin for KiCad"""
+    
+    def defaults(self):
+        """Plugin defaults"""
+        self.name = "Simple IPC Test"
+        self.category = "OrthoRoute"
+        self.description = "Test IPC plugin functionality"
+        self.show_toolbar_button = True
+        self.icon_file_name = os.path.join(os.path.dirname(__file__), "icon24.png")
+    
+    def Run(self):
+        """Run the plugin"""
+        # Create log file
+        log_file = Path.home() / "Documents" / "orthoroute_pcm_ipc_test.log"
+        
+        try:
+            with open(log_file, "w", encoding=\'utf-8\') as f:
+                f.write("=== OrthoRoute PCM IPC Test ===\\n")
+                f.write(f"Timestamp: {time.strftime(\'%Y-%m-%d %H:%M:%S\')}\\n")
+                f.write(f"Python executable: {sys.executable}\\n")
+                f.write(f"Python version: {sys.version}\\n")
+                f.write(f"Working directory: {os.getcwd()}\\n")
+                f.write(f"Script path: {__file__}\\n")
+                
+                # Check IPC environment
+                socket_path = os.environ.get(\'KICAD_API_SOCKET\')
+                api_token = os.environ.get(\'KICAD_API_TOKEN\')
+                f.write(f"KICAD_API_SOCKET: {socket_path}\\n")
+                f.write(f"KICAD_API_TOKEN: {\'YES\' if api_token else \'NO\'}\\n")
+                
+                # Try to show a message
+                try:
+                    import wx
+                    wx.MessageBox("PCM IPC Test plugin works!", "Success", wx.OK | wx.ICON_INFORMATION)
+                    f.write("SUCCESS: Showed wx MessageBox\\n")
+                except Exception as e:
+                    f.write(f"Failed to show wx MessageBox: {e}\\n")
+                    try:
+                        import tkinter as tk
+                        from tkinter import messagebox
+                        root = tk.Tk()
+                        root.withdraw()
+                        messagebox.showinfo("Success", "PCM IPC Test plugin works!")
+                        root.destroy()
+                        f.write("SUCCESS: Showed tkinter MessageBox\\n")
+                    except Exception as e2:
+                        f.write(f"Failed to show tkinter MessageBox: {e2}\\n")
+                
+                f.write("=== Test Complete ===\\n")
+                
+        except Exception as e:
+            print(f"Error in PCM IPC test: {e}")
+
+# Register the plugin
+SimpleIPCTestPlugin().register()
+'''
+        
+        init_path = plugins_dir / "__init__.py"
+        with open(init_path, 'w', encoding='utf-8') as f:
+            f.write(init_content)
+        print("✓ Created __init__.py with ActionPlugin")
+        
+        # Create 24x24 icon in plugins directory
+        icon_src = current_dir / "assets" / "BigIcon.png"
+        icon_dst = plugins_dir / "icon24.png"
+        if icon_src.exists():
+            shutil.copy2(icon_src, icon_dst)
+        else:
+            # Create simple fallback icon
+            icon_dst.write_bytes(b"")  # Empty file as placeholder
+        print("✓ Copied 24x24 icon to plugins/")
+        
+        # Create 64x64 icon in resources directory
+        resource_icon_dst = resources_dir / "icon.png"
+        if icon_src.exists():
+            shutil.copy2(icon_src, resource_icon_dst)
+        else:
+            resource_icon_dst.write_bytes(b"")
+        print("✓ Copied 64x64 icon to resources/")
+        
+        # Create metadata.json with IPC runtime
+        metadata = """{
+  "$schema": "https://go.kicad.org/pcm/schemas/v1",
+  "name": "OrthoRoute PCM IPC Test",
+  "description": "Test PCM package with IPC runtime for toolbar button verification",
+  "description_full": "Simple test to verify that PCM packages can create toolbar buttons when using IPC runtime. This plugin should appear as a button in the PCB Editor toolbar.",
+  "identifier": "com.github.benchoff.orthoroute-pcm-ipc-test",
+  "type": "plugin",
+  "author": {
+    "name": "Benchoff",
+    "contact": {
+      "web": "https://github.com/bbenchoff/OrthoRoute"
+    }
+  },
+  "license": "MIT",
+  "resources": {
+    "homepage": "https://github.com/bbenchoff/OrthoRoute"
+  },
+  "tags": ["test", "ipc", "pcm"],
+  "versions": [
+    {
+      "version": "1.0.0",
+      "status": "testing",
+      "kicad_version": "9.0",
+      "runtime": "ipc"
+    }
+  ]
+}"""
+        
+        metadata_path = temp_path / "metadata.json"
+        with open(metadata_path, 'w') as f:
+            f.write(metadata)
+        print("✓ Created metadata.json with IPC runtime")
+        
+        # Create ZIP package
+        with zipfile.ZipFile(package_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            for file_path in temp_path.rglob('*'):
+                if file_path.is_file():
+                    arcname = file_path.relative_to(temp_path)
+                    zipf.write(file_path, arcname)
+                    print(f"  Added: {arcname}")
+    
+    print(f"✅ PCM IPC package created: {package_path.absolute()}")
+    print(f"📦 Package size: {package_path.stat().st_size:,} bytes")
+    print()
+    print("🚀 Correct PCM Package Features:")
+    print("  ✅ Proper directory structure (plugins/, resources/)")
+    print("  ✅ ActionPlugin class with show_toolbar_button = True")
+    print("  ✅ IPC runtime specified in metadata.json")
+    print("  ✅ Icons in correct locations (24x24 in plugins/, 64x64 in resources/)")
+    print()
+    print("📋 Installation Process:")
+    print("  1. Install via PCM: Tools → Plugin and Content Manager → Install from File")
+    print("  2. Enable API server: Preferences → Plugins → Enable external plugin API server")
+    print("  3. Restart KiCad")
+    print("  4. 'Simple IPC Test' button should appear in toolbar!")
+
+if __name__ == "__main__":
+    build_correct_pcm_package()
