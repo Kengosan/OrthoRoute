@@ -1,7 +1,7 @@
 <table width="100%">
   <tr>
     <td align="right" width="300">
-      <img src="assets/icon200.png" alt="OrthoRoute Logo" width="200" />
+      <img src="Assets/icon200.png" alt="OrthoRoute Logo" width="200" />
     </td>
     <td align="left">
       <h2>Professional PCB Autorouting Using Official KiCad 9.0+ IPC APIs</h2>
