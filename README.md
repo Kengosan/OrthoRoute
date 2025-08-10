@@ -1,6 +1,6 @@
 <table width="100%">
   <tr>
-    <td align="right" width="300">
+    <td align="center" width="300">
       <img src="graphics/icon200.png" alt="OrthoRoute Logo" width="200" />
     </td>
     <td align="left">
