@@ -20,6 +20,7 @@ GPU-accelerated PCB autorouting plugin with real-time visualization and professi
 - **Professional Interface**: Clean Qt6-based interface with routing controls and progress monitoring
 - **Multi-layer Support**: Handle complex multi-layer PCB designs
 - **Smart Algorithms**: Advanced pathfinding with obstacle avoidance and via optimization
+- **Manhattan Routing**: Where OrthoRoute gets its name. 
 
 ## 📦 Installation
 

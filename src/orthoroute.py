@@ -430,11 +430,16 @@ def launch_qt_interface(board_data: Dict[str, Any], kicad_interface) -> None:
             logger.info(f"App icon set: {icon_path}")
         
         # Convert board data to format expected by the window
-        logger.info("Converting board data...")
+        logger.info("Converting board data for fast window launch...")
+        start_time = time.time()
         
-        # Convert to the format expected by the GUI
+        # Convert to the format expected by the GUI (fast visual elements only)
         gui_board_data = convert_board_data_for_gui(board_data)
-        logger.info(f"Converting board data: {len(board_data.get('footprints', []))} components, {len(board_data.get('tracks', []))} tracks")
+        
+        conversion_time = time.time() - start_time
+        logger.info(f"Fast GUI conversion completed in {conversion_time:.2f} seconds")
+        logger.info(f"Board data ready: {len(board_data.get('footprints', []))} components, {len(board_data.get('tracks', []))} tracks")
+        logger.info("Net connectivity analysis will be processed progressively in background")
         
         # Create and show main window
         logger.info("Creating main window...")
@@ -1196,61 +1201,7 @@ def convert_board_data_for_gui(board_data: Dict[str, Any]) -> Dict[str, Any]:
         else:
             bounds = (0, 0, 100, 100)
         
-        # Create net information
-        net_info = {}
-        net_pins = {}
-        
-        # Count pins per net
-        for net in nets:
-            try:
-                net_name = getattr(net, 'name', f'Net_{id(net)}')
-                # Count pads on this net
-                net_pads = [pad for pad in pads if hasattr(pad, 'net') and getattr(pad, 'net', None) == net]
-                
-                net_info[net_name] = {
-                    'name': net_name,
-                    'pin_count': len(net_pads),
-                    'routed': len([t for t in gui_tracks if getattr(t.get('net', None), 'name', '') == net_name]) > 0
-                }
-                
-                # Create pin positions for airwires
-                pins = []
-                for pad in net_pads[:10]:  # Limit for performance
-                    try:
-                        pos = getattr(pad, 'position', {'x': 0, 'y': 0})
-                        pins.append({
-                            'x': pos.x / 1000000 if hasattr(pos, 'x') else 0,
-                            'y': pos.y / 1000000 if hasattr(pos, 'y') else 0
-                        })
-                    except:
-                        pass
-                
-                net_pins[net_name] = pins
-                
-            except Exception as e:
-                logger.debug(f"Error processing net: {e}")
-        
-        # Create airwires for unrouted nets
-        airwires = []
-        airwire_count = 0
-        
-        for net_name, pins in net_pins.items():
-            if len(pins) > 1 and not net_info.get(net_name, {}).get('routed', False):
-                # Create airwires between pins (minimum spanning tree approach)
-                for i in range(len(pins) - 1):
-                    airwires.append({
-                        'start_x': pins[i]['x'],
-                        'start_y': pins[i]['y'],
-                        'end_x': pins[i + 1]['x'],
-                        'end_y': pins[i + 1]['y'],
-                        'net': net_name
-                    })
-                    airwire_count += 1
-        
-        logger.info(f"Pin distribution: {len([n for n in net_info.values() if n['pin_count'] > 1])} nets with pins")
-        for net_name, info in list(net_info.items())[:5]:
-            logger.info(f"  Net '{net_name}': {info['pin_count']} pins")
-        
+        # Fast GUI data for immediate window display (no net analysis)
         gui_data = {
             'components': components,
             'tracks': gui_tracks,
@@ -1259,27 +1210,22 @@ def convert_board_data_for_gui(board_data: Dict[str, Any]) -> Dict[str, Any]:
             'zones': gui_zones,
             'keepouts': gui_keepouts,
             'copper_pours': gui_copper_pours,  # Enhanced copper pours with thermal reliefs
-            'nets': net_info,
-            'airwires': airwires,
+            'nets': {},  # Empty initially - will be populated progressively
+            'airwires': [],  # Empty initially - will be populated progressively
             'bounds': bounds,
             'layers': ['F.Cu', 'B.Cu', 'F.Mask', 'B.Mask'],
-            'kicad_theme_colors': board_data.get('kicad_theme_colors', {})
+            'kicad_theme_colors': board_data.get('kicad_theme_colors', {}),
+            # Store raw data for progressive processing
+            '_raw_nets': nets,
+            '_raw_pads': pads,
+            '_gui_tracks': gui_tracks
         }
         
-        logger.info(f"Converting board data: {len(components)} components, {len(gui_tracks)} tracks")
+        logger.info(f"Fast GUI data ready: {len(components)} components, {len(gui_tracks)} tracks")
         logger.info(f"  Vias: {len(gui_vias)}, Pads: {len(gui_pads)}")
         logger.info(f"  Zones: {len(gui_zones)}, Keepouts: {len(gui_keepouts)}")
         logger.info(f"  Copper pours: {len(gui_copper_pours)} with thermal reliefs")
-        logger.info(f"Drew {len(airwires)} airwires from {len(net_pins)} nets")
-        if airwires:
-            sample_coords = [f"({a['start_x']:.1f},{a['start_y']:.1f})->({a['end_x']:.1f},{a['end_y']:.1f})" for a in airwires[:3]]
-            logger.info(f"Sample coordinates: {sample_coords}")
-        
-        unrouted_count = len([n for n in net_info.values() if not n.get('routed', False) and n['pin_count'] > 1])
-        logger.info(f"Unrouted nets: {unrouted_count}")
-        for net_name, info in list(net_info.items())[:3]:
-            if not info.get('routed', False) and info['pin_count'] > 1:
-                logger.info(f"  Net '{net_name}': {info['pin_count']} pins, routed={info.get('routed', False)}")
+        logger.info(f"Nets and airwires will be processed progressively...")
         
         return gui_data
         
@@ -1293,6 +1239,101 @@ def convert_board_data_for_gui(board_data: Dict[str, Any]) -> Dict[str, Any]:
             'bounds': (0, 0, 100, 100),
             'layers': ['F.Cu', 'B.Cu']
         }
+
+def process_nets_progressively(gui_data, progress_callback=None):
+    """Process nets and airwires progressively in batches"""
+    try:
+        nets = gui_data.get('_raw_nets', [])
+        pads = gui_data.get('_raw_pads', [])
+        gui_tracks = gui_data.get('_gui_tracks', [])
+        
+        net_info = {}
+        net_pins = {}
+        airwires = []
+        
+        logger.info(f"Starting progressive net processing: {len(nets)} nets to process")
+        
+        # Process nets in batches
+        batch_size = 50
+        for batch_start in range(0, len(nets), batch_size):
+            batch_end = min(batch_start + batch_size, len(nets))
+            batch_nets = nets[batch_start:batch_end]
+            
+            # Only log every 10th batch to reduce terminal spam
+            batch_num = batch_start // batch_size + 1
+            if batch_num % 10 == 1 or batch_num <= 5:
+                logger.info(f"Processing net batch {batch_num}: nets {batch_start}-{batch_end}")
+            elif batch_num % 50 == 0:
+                logger.info(f"Processing net batch {batch_num}: nets {batch_start}-{batch_end} (milestone)")
+            
+            # Process each net in the batch
+            for net in batch_nets:
+                try:
+                    net_name = getattr(net, 'name', f'Net_{id(net)}')
+                    # Count pads on this net
+                    net_pads = [pad for pad in pads if hasattr(pad, 'net') and getattr(pad, 'net', None) == net]
+                    
+                    net_info[net_name] = {
+                        'name': net_name,
+                        'pin_count': len(net_pads),
+                        'routed': len([t for t in gui_tracks if getattr(t.get('net', None), 'name', '') == net_name]) > 0
+                    }
+                    
+                    # Create pin positions for airwires
+                    pins = []
+                    for pad in net_pads[:10]:  # Limit for performance
+                        try:
+                            pos = getattr(pad, 'position', {'x': 0, 'y': 0})
+                            pins.append({
+                                'x': pos.x / 1000000 if hasattr(pos, 'x') else 0,
+                                'y': pos.y / 1000000 if hasattr(pos, 'y') else 0
+                            })
+                        except:
+                            pass
+                    
+                    net_pins[net_name] = pins
+                    
+                    # Create airwires for unrouted nets
+                    if len(pins) > 1 and not net_info.get(net_name, {}).get('routed', False):
+                        # Create airwires between pins (minimum spanning tree approach)
+                        for i in range(len(pins) - 1):
+                            airwires.append({
+                                'start_x': pins[i]['x'],
+                                'start_y': pins[i]['y'],
+                                'end_x': pins[i + 1]['x'],
+                                'end_y': pins[i + 1]['y'],
+                                'net': net_name
+                            })
+                    
+                except Exception as e:
+                    logger.debug(f"Error processing net: {e}")
+            
+            # Update progress
+            progress = (batch_end) / len(nets) * 100
+            if progress_callback:
+                progress_callback(int(progress), len(airwires), len(net_info))
+        
+        # Update GUI data with processed nets and airwires
+        gui_data['nets'] = net_info
+        gui_data['airwires'] = airwires
+        
+        # Clean up raw data
+        if '_raw_nets' in gui_data:
+            del gui_data['_raw_nets']
+        if '_raw_pads' in gui_data:
+            del gui_data['_raw_pads']
+        if '_gui_tracks' in gui_data:
+            del gui_data['_gui_tracks']
+        
+        logger.info(f"Progressive processing complete: {len(net_info)} nets, {len(airwires)} airwires")
+        unrouted_count = len([n for n in net_info.values() if not n.get('routed', False) and n['pin_count'] > 1])
+        logger.info(f"Unrouted nets: {unrouted_count}")
+        
+        return True
+        
+    except Exception as e:
+        logger.error(f"Error in progressive net processing: {e}")
+        return False
 
 def main():
     """Main entry point"""
