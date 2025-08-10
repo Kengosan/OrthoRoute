@@ -12,7 +12,7 @@
 
 GPU-accelerated PCB autorouting plugin with real-time visualization and professional-grade capabilities.
 
-## 🚀 Features
+## Features
 
 - **GPU-Accelerated Routing**: Harness the power of modern graphics cards for ultra-fast routing
 - **Real-time Visualization**: Live routing progress with interactive 2D board view
@@ -22,7 +22,7 @@ GPU-accelerated PCB autorouting plugin with real-time visualization and professi
 - **Smart Algorithms**: Advanced pathfinding with obstacle avoidance and via optimization
 - **Manhattan Routing**: Where OrthoRoute gets its name. 
 
-## 📸 Screenshots
+## Screenshots
 
 ### Main Interface
 <div align="center">
@@ -31,7 +31,7 @@ GPU-accelerated PCB autorouting plugin with real-time visualization and professi
   <em>The OrthoRoute plugin interface showing an unrouted <a href="https://jpralves.net/pages/cseduino-v4.html">CSEduino v4</a> board with airwires and board information panel.</em>
 </div>
 
-## 📦 Installation
+## Installation
 
 ### Option 1: Direct Download (Recommended)
 1. Download the latest release from the [Releases](https://github.com/bbenchoff/OrthoRoute/releases) page
@@ -45,7 +45,7 @@ cd OrthoRoute
 python build.py --package production
 ```
 
-## 🛠️ Requirements
+## Requirements
 
 ### Required Dependencies
 - **Python 3.8+**
@@ -58,7 +58,7 @@ python build.py --package production
 - **CuPy** - GPU acceleration (highly recommended)
 - **NVIDIA GPU** with CUDA support for best performance
 
-## 🎮 Usage
+## Usage
 
 1. Open your PCB project in KiCad
 2. Run the plugin from the command line:
@@ -73,7 +73,7 @@ python build.py --package production
    - Monitor progress in real-time
    - Apply routes back to KiCad
 
-## 🏗️ Project Structure
+## Project Structure
 
 ```
 OrthoRoute/
@@ -90,7 +90,7 @@ OrthoRoute/
 └── requirements.txt           # Python dependencies
 ```
 
-## 🔧 Building
+## Building
 
 The project includes a unified build system that creates multiple package formats:
 
@@ -113,7 +113,7 @@ python build.py --clean
 - **Lite** (`orthoroute-lite`): Minimal package for basic routing functionality
 - **Development** (`orthoroute-dev`): Development build with debugging tools and tests
 
-## 🚀 Performance
+## Performance
 
 OrthoRoute leverages GPU acceleration for exceptional performance:
 
@@ -122,35 +122,35 @@ OrthoRoute leverages GPU acceleration for exceptional performance:
 - **Real-time Updates**: Live visualization of routing progress
 - **Memory Efficient**: Optimized for large PCB designs
 
-## 🛡️ Stability
+## Stability
 
 - **Process Isolation**: Runs in separate process to prevent KiCad crashes
 - **Error Recovery**: Robust error handling and recovery mechanisms
 - **IPC Communication**: Safe inter-process communication with KiCad
 - **Memory Management**: Efficient memory usage for large designs
 
-## 📖 Documentation
+## Documentation
 
 - [Installation Guide](docs/installation.md)
 - [User Guide](docs/user_guide.md) 
 - [API Reference](docs/api_reference.md)
 - [Contributing](docs/contributing.md)
 
-## 🤝 Contributing
+## Contributing
 
-We welcome contributions! Please see [Contributing Guidelines](docs/contributing.md) for details.
+If something's not working or you just don't like it, first please complain. Complaining about free stuff will actually force me to fix it. Please see [Contributing Guidelines](docs/contributing.md) for details.
 
-## 📄 License
+## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
-## 🙋‍♂️ Support
+## 🙋Support
 
 - **Issues**: [GitHub Issues](https://github.com/bbenchoff/OrthoRoute/issues)
 - **Discussions**: [GitHub Discussions](https://github.com/bbenchoff/OrthoRoute/discussions)
 - **Documentation**: [Project Wiki](https://github.com/bbenchoff/OrthoRoute/wiki)
 
-## 🎯 Roadmap
+## Roadmap
 
 - [ ] Advanced routing algorithms (push-and-shove, differential pairs)
 - [ ] PCB stackup awareness and layer-specific routing
