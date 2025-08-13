@@ -21,7 +21,8 @@ GPU-accelerated PCB autorouting plugin with advanced thermal relief visualizatio
 - **Professional Interface**: Clean PyQt6-based interface with KiCad color themes
 - **Multi-layer Support**: Handle complex multi-layer PCB designs with front/back copper visualization
 - **GPU-Accelerated Routing**: Future support for ultra-fast routing algorithms
-- **Manhattan Routing**: Where OrthoRoute gets its name. 
+- **Manhattan Routing**: Where OrthoRoute gets its name
+- **It's A Plugin**: Just install it using the KiCad Plugin Manager
 
 ## Screenshots
 

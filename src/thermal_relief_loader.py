@@ -5,17 +5,19 @@ Extracts complete board data including thermal reliefs, exact pad shapes, and co
 """
 
 import logging
+import time
 from typing import Dict, Any, Optional, List
 
 logger = logging.getLogger(__name__)
 
 
-def load_kicad_thermal_relief_data(kicad_interface) -> Optional[Dict[str, Any]]:
+def load_kicad_thermal_relief_data(kicad_interface, progressive: bool = False) -> Optional[Dict[str, Any]]:
     """
     Load complete board data from KiCad including thermal reliefs and exact pad shapes.
     
     Args:
         kicad_interface: Connected KiCad interface object
+        progressive: If True, load only basic data and defer nets for progressive loading
         
     Returns:
         Dictionary containing complete board data with thermal reliefs, or None if failed
@@ -576,40 +578,52 @@ def load_kicad_thermal_relief_data(kicad_interface) -> Optional[Dict[str, Any]]:
         logger.info(f"Board bounds: {board_data['bounds']}")
         
         # Extract nets for airwires
-        logger.info("Extracting nets for airwires...")
-        try:
-            nets = board.get_nets()
-            logger.info(f"Found {len(nets)} nets in board")
-            
-            for net in nets:
-                net_name = net.name
-                net_code = net.code
+        if progressive:
+            # For progressive loading, just store raw nets reference and defer processing
+            logger.info("Deferring net extraction for progressive loading...")
+            try:
+                nets = board.get_nets()
+                board_data['_raw_nets'] = nets  # Store raw nets for later processing
+                board_data['_raw_pads_for_nets'] = board_data['pads']  # Store pads for net processing
+                logger.info(f"Stored {len(nets)} nets for progressive processing")
+            except Exception as e:
+                logger.error(f"Error storing nets for progressive loading: {e}")
+        else:
+            # Load nets synchronously (original behavior)
+            logger.info("Extracting nets for airwires...")
+            try:
+                nets = board.get_nets()
+                logger.info(f"Found {len(nets)} nets in board")
                 
-                # Skip special nets
-                if net_name in ['', 'unconnected', 'No Net']:
-                    continue
+                for net in nets:
+                    net_name = net.name
+                    net_code = net.code
+                    
+                    # Skip special nets
+                    if net_name in ['', 'unconnected', 'No Net']:
+                        continue
+                    
+                    # Count pads connected to this net
+                    connected_pads = []
+                    for pad in board_data['pads']:
+                        pad_net = pad.get('net')
+                        if pad_net and hasattr(pad_net, 'code') and pad_net.code == net_code:
+                            connected_pads.append(pad)
+                        elif isinstance(pad_net, dict) and pad_net.get('code') == net_code:
+                            connected_pads.append(pad)
+                    
+                    if len(connected_pads) >= 2:  # Only nets with 2+ pads need airwires
+                        board_data['nets'][net_name] = {
+                            'net_code': net_code,
+                            'pin_count': len(connected_pads),
+                            'routed': False  # Assume unrouted for now (could check if tracks exist)
+                        }
+                        logger.debug(f"  Net '{net_name}' (code {net_code}): {len(connected_pads)} pads")
                 
-                # Count pads connected to this net
-                connected_pads = []
-                for pad in board_data['pads']:
-                    pad_net = pad.get('net')
-                    if pad_net and hasattr(pad_net, 'code') and pad_net.code == net_code:
-                        connected_pads.append(pad)
-                    elif isinstance(pad_net, dict) and pad_net.get('code') == net_code:
-                        connected_pads.append(pad)
+                logger.info(f"Extracted {len(board_data['nets'])} nets with 2+ pads for airwires")
                 
-                if len(connected_pads) >= 2:  # Only nets with 2+ pads need airwires
-                    board_data['nets'][net_name] = {
-                        'net_code': net_code,
-                        'pin_count': len(connected_pads),
-                        'routed': False  # Assume unrouted for now (could check if tracks exist)
-                    }
-                    logger.debug(f"  Net '{net_name}' (code {net_code}): {len(connected_pads)} pads")
-            
-            logger.info(f"Extracted {len(board_data['nets'])} nets with 2+ pads for airwires")
-            
-        except Exception as e:
-            logger.error(f"Error extracting nets: {e}")
+            except Exception as e:
+                logger.error(f"Error extracting nets: {e}")
         
         # Log success summary
         components = len(board_data['components'])
@@ -633,9 +647,227 @@ def load_kicad_thermal_relief_data(kicad_interface) -> Optional[Dict[str, Any]]:
         logger.info(f"   Thermal reliefs are embedded in the complex polygon outlines!")
         
         return board_data
-        
+
     except Exception as e:
         logger.error(f"Error loading thermal relief data: {e}")
         import traceback
         logger.error(traceback.format_exc())
         return None
+
+
+def process_nets_progressively(board_data: Dict[str, Any], progress_callback=None) -> bool:
+    """
+    Process nets progressively from raw nets data stored during initial load.
+    ULTRA-FAST mode for large designs - skip all complex processing.
+    
+    Args:
+        board_data: Board data dictionary with '_raw_nets' key
+        progress_callback: Optional callback function(progress_percent, airwires_count, nets_count)
+        
+    Returns:
+        True if successful, False otherwise
+    """
+    logger.info("Starting progressive net processing...")
+    
+    # Set a very short timeout for large designs
+    start_time = time.time()
+    timeout_seconds = 30  # Only 30 seconds maximum
+    
+    try:
+        raw_nets = board_data.get('_raw_nets', [])
+        pads = board_data.get('_raw_pads_for_nets', board_data.get('pads', []))
+        
+        if not raw_nets:
+            logger.warning("No raw nets found for progressive processing")
+            return False
+        
+        logger.info(f"Processing {len(raw_nets)} nets progressively...")
+        
+        # EMERGENCY MODE: For massive designs, skip ALL processing and just count nets
+        emergency_mode = len(raw_nets) > 5000 or len(pads) > 10000
+        
+        if emergency_mode:
+            logger.info(f"EMERGENCY MODE: Massive design ({len(raw_nets)} nets, {len(pads)} pads). Skipping all complex processing.")
+            
+            # Just create basic net entries without any pad lookup or airwire generation
+            processed_nets = {}
+            for i, net in enumerate(raw_nets):  # Process ALL nets now that we have lazy airwire loading
+                if time.time() - start_time > 15:  # 15 second emergency timeout (more generous)
+                    logger.warning(f"Emergency timeout, processed {len(processed_nets)} nets")
+                    break
+                    
+                net_name = net.name
+                net_code = net.code
+                
+                # Skip special nets
+                if not net_name or net_name in ['', 'unconnected', 'No Net']:
+                    continue
+                
+                # Just add net without any pad analysis
+                processed_nets[net_name] = {
+                    'net_code': net_code,
+                    'pin_count': 2,  # Assume 2 pads for simplicity
+                    'routed': False
+                }
+                
+                # Ultra-fast progress updates
+                if progress_callback and i % 100 == 0:
+                    progress_percent = min(100, int((i + 1) * 100 / len(raw_nets)))
+                    progress_callback(progress_percent, len(processed_nets), len(processed_nets))
+                    time.sleep(0.001)  # Micro-yield
+            
+            # Set final results
+            board_data['nets'] = processed_nets
+            board_data['airwires'] = []  # No airwires in emergency mode
+            
+            logger.info(f"EMERGENCY MODE complete: {len(processed_nets)} nets processed in {time.time() - start_time:.1f}s (no airwires)")
+            
+        else:
+            # NORMAL MODE: Build minimal lookup for smaller designs
+            logger.info("Building minimal pad lookup table...")
+            lookup_start = time.time()
+            pads_by_net = {}
+            
+            # Limit pad processing even more aggressively
+            pads_to_process = pads[:5000] if len(pads) > 5000 else pads
+            
+            for i, pad in enumerate(pads_to_process):
+                # Very short timeout for lookup building
+                if time.time() - lookup_start > 5:  # Only 5 seconds for lookup
+                    logger.warning(f"Lookup timeout after 5s, processed {i}/{len(pads_to_process)} pads")
+                    break
+                    
+                pad_net = pad.get('net')
+                if pad_net:
+                    try:
+                        if hasattr(pad_net, 'code'):
+                            net_code = pad_net.code
+                        elif isinstance(pad_net, dict):
+                            net_code = pad_net.get('code')
+                        else:
+                            continue
+                            
+                        if net_code not in pads_by_net:
+                            pads_by_net[net_code] = []
+                        pads_by_net[net_code].append(pad)
+                    except:
+                        continue  # Skip problematic pads
+                
+                # Yield every 500 pads
+                if i % 500 == 0 and i > 0:
+                    time.sleep(0.001)
+            
+            lookup_time = time.time() - lookup_start
+            logger.info(f"Built lookup table for {len(pads_by_net)} net codes in {lookup_time:.1f}s")
+            
+            # Process nets with minimal lookup
+            processed_nets = {}
+            nets_to_process = raw_nets[:2000] if len(raw_nets) > 2000 else raw_nets  # Limit nets
+            
+            for i, net in enumerate(nets_to_process):
+                # Check timeout frequently
+                if time.time() - start_time > timeout_seconds:
+                    logger.warning(f"Net processing timeout, processed {len(processed_nets)} nets")
+                    break
+                
+                try:
+                    net_name = net.name
+                    net_code = net.code
+                    
+                    # Skip special nets
+                    if not net_name or net_name in ['', 'unconnected', 'No Net']:
+                        continue
+                    
+                    # Get pads quickly from lookup
+                    connected_pads = pads_by_net.get(net_code, [])
+                    
+                    if len(connected_pads) >= 2:
+                        processed_nets[net_name] = {
+                            'net_code': net_code,
+                            'pin_count': len(connected_pads),
+                            'routed': False
+                        }
+                    
+                    # Fast progress updates
+                    if progress_callback and i % 50 == 0:
+                        progress_percent = int((i + 1) * 100 / len(nets_to_process))
+                        progress_callback(progress_percent, len(processed_nets), len(processed_nets))
+                        time.sleep(0.002)  # Small yield
+                        
+                except Exception as e:
+                    logger.debug(f"Error processing net {i}: {e}")
+                    continue
+            
+            # Set results
+            board_data['nets'] = processed_nets
+            board_data['airwires'] = []  # No airwires for speed
+            
+            logger.info(f"Normal fast processing complete: {len(processed_nets)} nets in {time.time() - start_time:.1f}s")
+        
+        # Clean up temporary data
+        if '_raw_nets' in board_data:
+            del board_data['_raw_nets']
+        if '_raw_pads_for_nets' in board_data:
+            del board_data['_raw_pads_for_nets']
+        
+        if progress_callback:
+            progress_callback(100, len(board_data.get('airwires', [])), len(board_data.get('nets', {})))
+        
+        return True
+        
+    except Exception as e:
+        logger.error(f"Error in progressive net processing: {e}")
+        # Emergency fallback - just provide empty nets
+        board_data['nets'] = {}
+        board_data['airwires'] = []
+        return False
+
+
+def generate_mst_airwires(pads: List[Dict[str, Any]], net_name: str) -> List[Dict[str, Any]]:
+    """
+    Generate airwires using ultra-fast algorithm optimized for speed.
+    Only called for very small nets (<=5 pads) to avoid performance issues.
+    
+    Args:
+        pads: List of pad dictionaries with 'x' and 'y' coordinates
+        net_name: Name of the net
+        
+    Returns:
+        List of airwire dictionaries with start/end coordinates
+    """
+    if len(pads) < 2:
+        return []
+    
+    # ULTRA FAST MODE: For any net >5 pads, this function shouldn't be called
+    # but if it is, use absolute minimal processing
+    if len(pads) > 5:
+        logger.warning(f"generate_mst_airwires called with {len(pads)} pads - should be limited to <=5")
+        # Just connect first 2 pads and return
+        p1, p2 = pads[0], pads[1]
+        distance = ((p1.get('x', 0) - p2.get('x', 0))**2 + (p1.get('y', 0) - p2.get('y', 0))**2)**0.5
+        return [{
+            'net_name': net_name,
+            'start_x': p1.get('x', 0),
+            'start_y': p1.get('y', 0),
+            'end_x': p2.get('x', 0),
+            'end_y': p2.get('y', 0),
+            'length': distance
+        }]
+    
+    # For very small nets (<=5 pads), use simple star topology (fastest algorithm)
+    airwires = []
+    center_pad = pads[0]
+    
+    for i in range(1, len(pads)):
+        pad = pads[i]
+        distance = ((center_pad.get('x', 0) - pad.get('x', 0))**2 + (center_pad.get('y', 0) - pad.get('y', 0))**2)**0.5
+        airwires.append({
+            'net_name': net_name,
+            'start_x': center_pad.get('x', 0),
+            'start_y': center_pad.get('y', 0),
+            'end_x': pad.get('x', 0),
+            'end_y': pad.get('y', 0),
+            'length': distance
+        })
+    
+    return airwires
