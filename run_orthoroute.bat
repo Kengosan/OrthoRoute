@@ -9,6 +9,6 @@ echo ======================================
 echo.
 
 cd /d "%~dp0src"
-python orthoroute.py
+python orthoroute_plugin.py
 
 pause

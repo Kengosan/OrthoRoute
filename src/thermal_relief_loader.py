@@ -324,20 +324,48 @@ def load_kicad_thermal_relief_data(kicad_interface, progressive: bool = False) -
         logger.info(f"Starting to process {len(vias)} vias...")
         for i, via in enumerate(vias):
             try:
-                pos = via.position
+                # Get position using KiCad API
+                pos = via.GetPosition() if hasattr(via, 'GetPosition') else via.position
+                
+                # Get via dimensions using proper KiCad API methods
+                try:
+                    # Use KiCad API methods with fallbacks
+                    if hasattr(via, 'GetWidth'):
+                        via_diameter = via.GetWidth() / 1000000.0  # Convert to mm
+                    elif hasattr(via, 'width'):
+                        via_diameter = via.width / 1000000.0
+                    else:
+                        via_diameter = 0.6  # Default value
+                    
+                    if hasattr(via, 'GetDrill'):
+                        drill_diameter = via.GetDrill() / 1000000.0  # Convert to mm
+                    elif hasattr(via, 'drill'):
+                        drill_diameter = via.drill / 1000000.0
+                    else:
+                        drill_diameter = 0.3  # Default value
+                        
+                except Exception as e:
+                    logger.warning(f"Error getting via dimensions for via {i}: {e}")
+                    via_diameter = 0.6
+                    drill_diameter = 0.3
                 
                 via_data = {
-                    'x': pos.x / 1000000.0,
-                    'y': pos.y / 1000000.0,
-                    'via_diameter': via.width / 1000000.0,
-                    'drill_diameter': via.drill / 1000000.0
+                    'x': pos.x / 1000000.0 if hasattr(pos, 'x') else 0.0,
+                    'y': pos.y / 1000000.0 if hasattr(pos, 'y') else 0.0,
+                    'via_diameter': via_diameter,
+                    'drill_diameter': drill_diameter
                 }
                 board_data['vias'].append(via_data)
-                if i < 3:  # Log first few for debugging
-                    logger.info(f"Processed via {i}: {via_data}")
+                if i < 5:  # Log first few for debugging - increased to 5
+                    logger.info(f"Processed via {i}: pos=({via_data['x']:.2f}, {via_data['y']:.2f}), dia={via_data['via_diameter']:.3f}mm, drill={via_data['drill_diameter']:.3f}mm")
                     
             except Exception as e:
                 logger.error(f"Error processing via {i}: {e}")
+                # Log more details about the via object for debugging
+                if i < 3:
+                    logger.error(f"Via {i} type: {type(via)}")
+                    if hasattr(via, '__dict__'):
+                        logger.error(f"Via {i} attributes: {list(via.__dict__.keys())}")
         
         logger.info(f"Finished processing vias. Total in board_data: {len(board_data['vias'])}")
         
@@ -345,23 +373,64 @@ def load_kicad_thermal_relief_data(kicad_interface, progressive: bool = False) -
         logger.info(f"Starting to process {len(tracks)} tracks...")
         for i, track in enumerate(tracks):
             try:
-                start = track.start
-                end = track.end
+                # Get track endpoints using KiCad API
+                try:
+                    if hasattr(track, 'GetStart'):
+                        start = track.GetStart()
+                    else:
+                        start = track.start
+                        
+                    if hasattr(track, 'GetEnd'):
+                        end = track.GetEnd()
+                    else:
+                        end = track.end
+                        
+                    # Get track width using KiCad API
+                    if hasattr(track, 'GetWidth'):
+                        width = track.GetWidth() / 1000000.0  # Convert to mm
+                    else:
+                        width = track.width / 1000000.0
+                        
+                    # Get layer using KiCad API  
+                    if hasattr(track, 'GetLayer'):
+                        layer = track.GetLayer()
+                    else:
+                        layer = track.layer
+                        
+                except Exception as e:
+                    logger.warning(f"Error getting track properties for track {i}: {e}")
+                    # Fallback to direct attribute access
+                    start = track.start
+                    end = track.end
+                    width = track.width / 1000000.0
+                    layer = track.layer
                 
                 track_data = {
                     'start_x': start.x / 1000000.0,
                     'start_y': start.y / 1000000.0,
                     'end_x': end.x / 1000000.0,
                     'end_y': end.y / 1000000.0,
-                    'width': track.width / 1000000.0,
-                    'layer': track.layer
+                    'width': width,
+                    'layer': layer
                 }
                 board_data['tracks'].append(track_data)
-                if i < 3:  # Log first few for debugging
-                    logger.info(f"Processed track {i}: {track_data}")
+                if i < 5:  # Log first few for debugging - increased to 5
+                    layer_info = f"layer={layer}"
+                    if layer == 3:
+                        layer_info += " (F.Cu)"
+                    elif layer == 34:
+                        layer_info += " (B.Cu)"
+                    else:
+                        layer_info += " (Unknown)"
+                    logger.info(f"Processed track {i}: start=({track_data['start_x']:.2f}, {track_data['start_y']:.2f}), end=({track_data['end_x']:.2f}, {track_data['end_y']:.2f}), width={track_data['width']:.3f}mm, {layer_info}")
                     
             except Exception as e:
                 logger.error(f"Error processing track {i}: {e}")
+                # Log more details about the track object for debugging
+                if i < 3:
+                    logger.error(f"Track {i} type: {type(track)}")
+                    if hasattr(track, '__dict__'):
+                        logger.error(f"Track {i} attributes: {list(track.__dict__.keys())}")
         
         logger.info(f"Finished processing tracks. Total in board_data: {len(board_data['tracks'])}")
         
