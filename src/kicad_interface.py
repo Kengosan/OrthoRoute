@@ -237,13 +237,27 @@ class KiCadInterface:
         pads = []
         try:
             all_pads = _ipc_retry(board.get_pads, "get_pads", max_retries=3, sleep_s=0.7)
+            
+            # Extract pad data with polygon shapes for accurate geometry
+            logger.info(f"Found {len(all_pads)} pads - extracting with polygon shapes")
+            
+            # Get pad shapes as polygons for both front and back copper
+            try:
+                front_pad_shapes = board.get_pad_shapes_as_polygons(all_pads, 3)  # Front copper (layer 3)
+                back_pad_shapes = board.get_pad_shapes_as_polygons(all_pads, 34)  # Back copper (layer 34)
+                logger.info(f"Got pad polygon shapes: {len(front_pad_shapes)} front, {len(back_pad_shapes)} back")
+            except Exception as e:
+                logger.error(f"Error getting pad polygon shapes: {e}")
+                front_pad_shapes = [None] * len(all_pads)
+                back_pad_shapes = [None] * len(all_pads)
+            
             for i, p in enumerate(all_pads):
                 try:
                     # Basic position and net data
                     pos = getattr(p, 'position', None)
                     x = float(getattr(pos, 'x', 0.0)) / 1000000.0 if pos is not None else 0.0  # Convert nm to mm
                     y = float(getattr(pos, 'y', 0.0)) / 1000000.0 if pos is not None else 0.0  # Convert nm to mm
-                    net = getattr(getattr(p, 'net', None), 'name', None)
+                    net = getattr(p, 'net', None)
                     num = getattr(p, 'number', None)
                     
                     # Enhanced geometric data from padstack for accurate rendering
@@ -252,7 +266,6 @@ class KiCadInterface:
                     size_y = 1.3  # Default  
                     drill_diameter = 0.0
                     shape = 1  # Default to rectangle
-                    layers = []
                     
                     if padstack:
                         # Get drill diameter from padstack
@@ -279,103 +292,175 @@ class KiCadInterface:
                                 shape = shape_val.value
                             else:
                                 shape = int(shape_val)
-                        
-                        # Get layers from padstack
-                        padstack_layers = getattr(padstack, 'layers', [])
-                        if padstack_layers:
-                            for layer in padstack_layers:
-                                layers.append(str(layer))
                     
-                    # Fallback: Try direct pad attributes if padstack fails
-                    if size_x == 1.3 and size_y == 1.3:  # Still default values
-                        size = getattr(p, 'size', None)
-                        if size:
-                            size_x = float(getattr(size, 'x', 1300000.0)) / 1000000.0
-                            size_y = float(getattr(size, 'y', 1300000.0)) / 1000000.0
+                    # Extract polygon shapes for this pad
+                    polygons = {}
+                    
+                    # Process front copper polygon
+                    if i < len(front_pad_shapes) and front_pad_shapes[i] is not None:
+                        polygon_shape = front_pad_shapes[i]
+                        outline_points = []
+                        
+                        if hasattr(polygon_shape, 'outline'):
+                            outline = polygon_shape.outline
+                            for point_node in outline:
+                                if hasattr(point_node, 'point'):
+                                    point = point_node.point
+                                    outline_points.append({
+                                        'x': point.x / 1000000.0,
+                                        'y': point.y / 1000000.0
+                                    })
+                        
+                        if outline_points:
+                            polygons['F.Cu'] = {
+                                'outline': outline_points,
+                                'holes': []  # Pads typically don't have holes in their shape
+                            }
+                    
+                    # Process back copper polygon
+                    if i < len(back_pad_shapes) and back_pad_shapes[i] is not None:
+                        polygon_shape = back_pad_shapes[i]
+                        outline_points = []
+                        
+                        if hasattr(polygon_shape, 'outline'):
+                            outline = polygon_shape.outline
+                            for point_node in outline:
+                                if hasattr(point_node, 'point'):
+                                    point = point_node.point
+                                    outline_points.append({
+                                        'x': point.x / 1000000.0,
+                                        'y': point.y / 1000000.0
+                                    })
+                        
+                        if outline_points:
+                            polygons['B.Cu'] = {
+                                'outline': outline_points,
+                                'holes': []
+                            }
+                    
+                    # Determine actual layers this pad exists on
+                    actual_pad_layers = []
+                    if drill_diameter > 0:
+                        # Through-hole pads appear on both layers
+                        actual_pad_layers = ['F.Cu', 'B.Cu']
+                    else:
+                        # SMD pads - determine actual layer from padstack, not polygon keys
+                        # (polygon keys include both layers even for SMD pads)
+                        actual_pad_layers = []
+                        
+                        if padstack:
+                            # Method 1: Check padstack copper layers to find the actual layer
+                            copper_layers = getattr(padstack, 'copper_layers', [])
+                            for layer in copper_layers:
+                                layer_id = getattr(layer, 'layer', None)
+                                if hasattr(layer_id, 'value'):
+                                    layer_id = layer_id.value
+                                elif hasattr(layer_id, 'layer_id'):
+                                    layer_id = layer_id.layer_id
+                                
+                                # Map KiCad layer IDs to layer names
+                                if layer_id == 3:  # F.Cu
+                                    actual_pad_layers.append('F.Cu')
+                                elif layer_id == 34:  # B.Cu
+                                    actual_pad_layers.append('B.Cu')
+                                else:
+                                    # Check if this copper layer corresponds to F.Cu or B.Cu
+                                    layer_name = str(layer_id)
+                                    if 'front' in layer_name.lower() or 'f.cu' in layer_name.lower():
+                                        actual_pad_layers.append('F.Cu')
+                                    elif 'back' in layer_name.lower() or 'b.cu' in layer_name.lower():
+                                        actual_pad_layers.append('B.Cu')
+                        
+                        # Remove duplicates
+                        actual_pad_layers = list(set(actual_pad_layers))
+                        
+                        # Fallback: If no layer detected, use polygon presence to make best guess
+                        if not actual_pad_layers:
+                            # Only include a layer if it has significant polygon data
+                            for layer_name, polygon_data in polygons.items():
+                                outline = polygon_data.get('outline', [])
+                                if len(outline) >= 3:  # Valid polygon
+                                    # For SMD pads, typically only one layer should have valid data
+                                    # But if both have data, prefer F.Cu (component side)
+                                    if layer_name == 'F.Cu':
+                                        actual_pad_layers = ['F.Cu']
+                                        break
+                                    elif layer_name == 'B.Cu' and not actual_pad_layers:
+                                        actual_pad_layers = ['B.Cu']
+                        
+                        # Final fallback for SMD pads
+                        if not actual_pad_layers:
+                            actual_pad_layers = ['F.Cu']  # Default for SMD
                     
                     # === COMPREHENSIVE PAD DATA EXTRACTION ===
-                    # Extract all pad information from padstack (the authoritative source)
                     pad_data = {
                         'net': net, 
                         'number': num, 
                         'x': x, 
                         'y': y,
+                        'size_x': size_x,
+                        'size_y': size_y,
+                        'shape': shape,
+                        'drill_diameter': drill_diameter,
+                        'layers': actual_pad_layers,
+                        'polygons': polygons  # Add exact polygon shapes from KiCad
                     }
                     
-                    # Get comprehensive information from padstack
-                    padstack = getattr(p, 'padstack', None)
-                    if padstack and hasattr(padstack, 'copper_layers') and len(padstack.copper_layers) > 0:
-                        copper_layer = padstack.copper_layers[0]  # Primary copper layer
-                        
-                        # Shape information (1=circle, 2=square, 3=oval/rectangle)
-                        shape = getattr(copper_layer, 'shape', 1)
-                        pad_data['shape'] = shape
-                        pad_data['shape_name'] = {1: 'circle', 2: 'square', 3: 'oval'}.get(shape, 'circle')
-                        
-                        # Size information from padstack
-                        copper_size = getattr(copper_layer, 'size', None)
-                        if copper_size:
-                            pad_data['size_x'] = float(getattr(copper_size, 'x', 1300000.0)) / 1000000.0
-                            pad_data['size_y'] = float(getattr(copper_size, 'y', 1300000.0)) / 1000000.0
-                        else:
-                            pad_data['size_x'] = 1.3  # Default fallback
-                            pad_data['size_y'] = 1.3
-                        
-                        # Pad type information
-                        pad_data['padstack_type'] = getattr(padstack, 'type', None)
-                        pad_data['padstack_mode'] = getattr(padstack, 'mode', None)
-                        
-                        # Check for different shapes on different layers (multi-layer padstack)
-                        if len(padstack.copper_layers) > 1:
-                            pad_data['multilayer'] = True
-                            pad_data['layer_shapes'] = []
-                            for i, layer in enumerate(padstack.copper_layers):
-                                layer_info = {
-                                    'layer_index': i,
-                                    'shape': getattr(layer, 'shape', 1),
-                                    'size_x': float(getattr(getattr(layer, 'size', None), 'x', 1300000.0)) / 1000000.0 if hasattr(layer, 'size') else pad_data['size_x'],
-                                    'size_y': float(getattr(getattr(layer, 'size', None), 'y', 1300000.0)) / 1000000.0 if hasattr(layer, 'size') else pad_data['size_y'],
-                                }
-                                pad_data['layer_shapes'].append(layer_info)
-                        else:
-                            pad_data['multilayer'] = False
-                    else:
-                        # Fallback to legacy method if no padstack
-                        pad_data.update({
-                            'shape': shape,  # From previous logic
-                            'shape_name': {1: 'circle', 2: 'square', 3: 'oval'}.get(shape, 'circle'),
-                            'size_x': size_x,
-                            'size_y': size_y,
-                            'padstack_type': None,
-                            'padstack_mode': None,
-                            'multilayer': False,
-                        })
-                    
-                    # Drill information
-                    pad_data['drill_diameter'] = drill_diameter
-                    
-                    # Layer information
-                    pad_data['layers'] = layers
-                    
-                    # Pad classification attempt
+                    # Pad classification
                     if drill_diameter > 0:
-                        if pad_data.get('padstack_type') == 1:
-                            pad_data['pad_type'] = 'through-hole'  # THT
-                        else:
-                            pad_data['pad_type'] = 'through-hole'  # Default for drilled pads
+                        pad_data['pad_type'] = 'through-hole'  # THT
                     else:
                         pad_data['pad_type'] = 'smd'  # Surface mount if no drill
                     
-                    # Special case detection
-                    if pad_data['size_x'] > 5.0 or pad_data['size_y'] > 5.0:
-                        pad_data['pad_type'] = 'mechanical'  # Large pads likely mechanical/mounting
-                    
-                    if drill_diameter > 2.0 and (pad_data['size_x'] < 0.1 or pad_data['size_y'] < 0.1):
-                        pad_data['pad_type'] = 'npth'  # Non-plated through hole
-                    
                     # Debug log first few pads to verify data extraction
-                    if i < 3:
-                        logger.info(f"Pad {i}: pos=({x:.3f},{y:.3f})mm, size=({size_x:.3f},{size_y:.3f})mm, drill={drill_diameter:.3f}mm, shape={shape}, layers={layers}")
+                    if i < 20:  # Show more pads to catch any SMD ones
+                        polygon_info = f", polygons: {list(polygons.keys())}" if polygons else ""
+                        drill_info = f", drill: {drill_diameter:.2f}mm" if drill_diameter > 0 else " (SMD)"
+                        pad_type = "Through-hole" if drill_diameter > 0 else "Surface-mount"
+                        layer_info = f", layers: {actual_pad_layers}"
+                        
+                        # Extra detailed logging for SMD pads
+                        if drill_diameter == 0:
+                            layer_detection_info = ""
+                            if padstack:
+                                copper_layers = getattr(padstack, 'copper_layers', [])
+                                layer_ids = []
+                                for layer in copper_layers:
+                                    layer_id = getattr(layer, 'layer', None)
+                                    if hasattr(layer_id, 'value'):
+                                        layer_ids.append(layer_id.value)
+                                    elif hasattr(layer_id, 'layer_id'):
+                                        layer_ids.append(layer_id.layer_id)
+                                    else:
+                                        layer_ids.append(str(layer_id))
+                                layer_detection_info = f", copper_layer_ids: {layer_ids}"
+                            
+                            logger.info(f"SMD Pad {i}: pos=({x:.2f}, {y:.2f}), size=({size_x:.2f}x{size_y:.2f}){drill_info} [{pad_type}]{polygon_info}{layer_info}{layer_detection_info}")
+                        else:
+                            logger.info(f"Pad {i}: pos=({x:.2f}, {y:.2f}), size=({size_x:.2f}x{size_y:.2f}){drill_info} [{pad_type}]{polygon_info}{layer_info}")
+                    
+                    # Quick stats for debugging
+                    if i == 0:
+                        smd_count = 0
+                        th_count = 0
+                        smd_front_count = 0
+                        smd_back_count = 0
+                        smd_both_count = 0
+                    if drill_diameter > 0:
+                        th_count += 1
+                    else:
+                        smd_count += 1
+                        if actual_pad_layers == ['F.Cu']:
+                            smd_front_count += 1
+                        elif actual_pad_layers == ['B.Cu']:
+                            smd_back_count += 1
+                        elif 'F.Cu' in actual_pad_layers and 'B.Cu' in actual_pad_layers:
+                            smd_both_count += 1
+                    
+                    # Show pad type breakdown after processing significant number
+                    if i == 99 or i == len(all_pads) - 1:
+                        logger.info(f"📊 Pad analysis (first {i+1} pads): {th_count} through-hole, {smd_count} SMD")
+                        logger.info(f"📊 SMD breakdown: {smd_front_count} F.Cu only, {smd_back_count} B.Cu only, {smd_both_count} both layers (SHOULD BE 0!)")
                     
                     pads.append(pad_data)
                 except Exception as e:
@@ -438,135 +523,112 @@ class KiCadInterface:
         except Exception as e:
             logger.error(f"Error getting vias: {e}")
 
-        # Get copper zones/planes for plane-aware routing AND visualization
+        # Get copper zones/planes for plane-aware routing AND complete thermal relief extraction
         copper_zones = []
         zones_for_visualization = []
         try:
             zones = _ipc_retry(board.get_zones, "get_zones", max_retries=2, sleep_s=0.5)
-            for zone in zones:
+            logger.info(f"Found {len(zones)} zones")
+            
+            for i, zone in enumerate(zones):
                 try:
                     zone_net = getattr(zone, 'net', None)
-                    zone_layer = getattr(zone, 'layer', 'F.Cu')
+                    zone_layers = getattr(zone, 'layers', [])
                     zone_net_name = zone_net.name if zone_net and hasattr(zone_net, 'name') else None
+                    
+                    logger.info(f"Zone {i}: net={zone_net_name}, layers={zone_layers}")
                     
                     # Basic zone info for routing
                     if zone_net_name:
                         copper_zones.append({
                             'net': zone_net_name,
-                            'layer': zone_layer,
+                            'layers': list(zone_layers),
                             'filled': getattr(zone, 'is_filled', True)
                         })
-                        logger.debug(f"Found copper zone: {zone_net_name} on {zone_layer}")
+                        logger.debug(f"Found copper zone: {zone_net_name} on {zone_layers}")
                     
-                    # Detailed zone info for visualization
-                    zone_outline_points = []
+                    # === COMPLETE THERMAL RELIEF EXTRACTION ===
+                    # Extract filled polygons - this contains thermal relief geometry
+                    filled_polygons = getattr(zone, 'filled_polygons', {})
                     
-                    # Get outline points
-                    outline = getattr(zone, 'outline', None)
-                    if outline and hasattr(outline, 'outline'):
-                        for point in outline.outline:
-                            if hasattr(point, 'location'):
-                                loc = point.location
-                                if hasattr(loc, 'x') and hasattr(loc, 'y'):
-                                    zone_outline_points.append({
-                                        'x': float(loc.x) / 1000000.0,  # Convert nm to mm
-                                        'y': float(loc.y) / 1000000.0   # Convert nm to mm
-                                    })
+                    zone_data = {
+                        'net': zone_net_name or 'unnamed',
+                        'layers': list(zone_layers),
+                        'filled_polygons': {}
+                    }
                     
-                    # Extract filled polygons - this is where copper pour data is stored
-                    # Based on debug output: filled_polygons is a dict {3: [PolygonWithHoles(...), ...]}
-                    zone_filled_polygons = {}
-                    
-                    try:
-                        filled_polygons = getattr(zone, 'filled_polygons', {})
-                        logger.debug(f"Zone {zone_net_name}: filled_polygons type = {type(filled_polygons)}")
+                    for layer_id, polygon_list in filled_polygons.items():
+                        logger.info(f"  Layer {layer_id}: {len(polygon_list)} polygons")
+                        layer_polygons = []
                         
-                        if isinstance(filled_polygons, dict):
-                            for layer_id, poly_list in filled_polygons.items():
-                                logger.debug(f"Processing layer {layer_id} with {len(poly_list) if isinstance(poly_list, list) else 'non-list'} polygons")
-                                layer_polys = []
+                        for j, polygon in enumerate(polygon_list):
+                            outline = getattr(polygon, 'outline', None)
+                            holes = getattr(polygon, 'holes', [])
+                            
+                            if outline:
+                                logger.info(f"    Polygon {j}: {len(outline)} outline points, {len(holes)} holes")
                                 
-                                if isinstance(poly_list, list):
-                                    for poly_idx, poly in enumerate(poly_list):
-                                        logger.debug(f"Processing polygon {poly_idx}, type: {type(poly)}")
-                                        
-                                        # Handle PolygonWithHoles object
-                                        outline = getattr(poly, 'outline', None)
-                                        if outline:
-                                            nodes = getattr(outline, 'nodes', [])
-                                            poly_points = []
-                                            
-                                            logger.debug(f"Found outline with {len(nodes)} nodes")
-                                            
-                                            for node in nodes:
-                                                point = getattr(node, 'point', None)
-                                                if point:
-                                                    x_nm = float(getattr(point, 'x', 0.0))
-                                                    y_nm = float(getattr(point, 'y', 0.0))
-                                                    poly_points.append({
-                                                        'x': x_nm / 1000000.0,  # Convert nm to mm
-                                                        'y': y_nm / 1000000.0   # Convert nm to mm
-                                                    })
-                                            
-                                            if poly_points:
-                                                logger.debug(f"Created polygon with {len(poly_points)} points")
-                                                
-                                                # Handle holes for thermal relief
-                                                holes = []
-                                                poly_holes = getattr(poly, 'holes', [])
-                                                for hole in poly_holes:
-                                                    hole_nodes = getattr(hole, 'nodes', [])
-                                                    hole_points = []
-                                                    for node in hole_nodes:
-                                                        point = getattr(node, 'point', None)
-                                                        if point:
-                                                            x_nm = float(getattr(point, 'x', 0.0))
-                                                            y_nm = float(getattr(point, 'y', 0.0))
-                                                            hole_points.append({
-                                                                'x': x_nm / 1000000.0,
-                                                                'y': y_nm / 1000000.0
-                                                            })
-                                                    if hole_points:
-                                                        holes.append(hole_points)
-                                                
-                                                layer_polys.append({
-                                                    'outline': poly_points,
-                                                    'holes': holes
-                                                })
+                                # Convert outline points to our format
+                                outline_points = []
+                                for point in outline:
+                                    # Handle PolyLineNode structure properly
+                                    if hasattr(point, 'point'):
+                                        actual_point = point.point  # Get Vector2 from PolyLineNode
+                                        outline_points.append({
+                                            'x': actual_point.x / 1000000.0,  # Convert to mm
+                                            'y': actual_point.y / 1000000.0
+                                        })
+                                    elif hasattr(point, 'x') and hasattr(point, 'y'):
+                                        # Direct point access
+                                        outline_points.append({
+                                            'x': point.x / 1000000.0,  # Convert to mm
+                                            'y': point.y / 1000000.0
+                                        })
                                 
-                                if layer_polys:
-                                    zone_filled_polygons[layer_id] = layer_polys
-                                    logger.info(f"Successfully extracted {len(layer_polys)} polygons for layer {layer_id}")
+                                # Convert hole points to our format
+                                hole_data = []
+                                for hole in holes:
+                                    hole_points = []
+                                    for point in hole:
+                                        # Handle PolyLineNode structure properly
+                                        if hasattr(point, 'point'):
+                                            actual_point = point.point  # Get Vector2 from PolyLineNode
+                                            hole_points.append({
+                                                'x': actual_point.x / 1000000.0,
+                                                'y': actual_point.y / 1000000.0
+                                            })
+                                        elif hasattr(point, 'x') and hasattr(point, 'y'):
+                                            # Direct point access
+                                            hole_points.append({
+                                                'x': point.x / 1000000.0,
+                                                'y': point.y / 1000000.0
+                                            })
+                                    if hole_points:
+                                        hole_data.append(hole_points)
+                                
+                                polygon_data = {
+                                    'outline': outline_points,
+                                    'holes': hole_data
+                                }
+                                
+                                layer_polygons.append(polygon_data)
+                                
+                                # Log thermal relief detection
+                                if len(outline_points) > 1000:
+                                    logger.info(f"     🎯 THERMAL RELIEF DETECTED: {len(outline_points)} points trace around pads!")
+                                
+                        zone_data['filled_polygons'][layer_id] = layer_polygons
                     
-                    except Exception as e:
-                        logger.error(f"Zone filled polygon extraction failed: {e}")
-                        logger.exception("Full traceback:")
+                    zones_for_visualization.append(zone_data)
+                    logger.info(f"  Added thermal relief zone {i} with layers: {list(zone_layers)}")
                     
-                    # Log zone extraction results
-                    if zone_filled_polygons:
-                        total_polys = sum(len(polys) for polys in zone_filled_polygons.values())
-                        total_points = sum(len(poly['outline']) for layer_polys in zone_filled_polygons.values() for poly in layer_polys)
-                        logger.info(f"Zone '{zone_net_name}': {len(zone_filled_polygons)} layers, {total_polys} polygon(s), {total_points} total points")
-                    else:
-                        logger.debug(f"Zone '{zone_net_name}': No filled polygons found")
-                    
-                    # Add zone for visualization if it has geometry
-                    if zone_outline_points or zone_filled_polygons:
-                        zones_for_visualization.append({
-                            'net': zone_net_name,
-                            'layer': zone_layer,
-                            'outline_points': zone_outline_points,
-                            'filled_polygons': zone_filled_polygons,
-                            'filled': getattr(zone, 'filled', True)  # Changed from is_filled to filled
-                        })
-                        logger.info(f"Added zone '{zone_net_name}' to visualization list")
-                        
                 except Exception as e:
-                    logger.debug(f"Zone parse error: {e}")
-            
-            logger.info(f"Found {len(copper_zones)} copper zones/planes, {len(zones_for_visualization)} zones for visualization")
+                    logger.error(f"Error processing zone {i}: {e}")
+        
         except Exception as e:
-            logger.debug(f"No zones found or error: {e}")
+            logger.error(f"Error getting zones: {e}")
+        
+        logger.info(f"Processed {len(zones_for_visualization)} zones with thermal relief data")
 
         # Nets (with pins derived from pads)
         nets = []
@@ -575,15 +637,33 @@ class KiCadInterface:
             # Group pads by net - coordinates already converted to mm
             pins_by_net: Dict[str, List[Dict]] = {}
             for pad in pads:
-                n = pad.get('net')
-                if not n or n == "":
+                net_obj = pad.get('net')
+                if not net_obj:
                     continue
-                pins_by_net.setdefault(n, []).append({'x': pad['x'], 'y': pad['y'], 'layer': 0, 'pad_name': pad.get('number')})
+                
+                # Extract net name from Net object or string
+                if hasattr(net_obj, 'name'):
+                    net_name = net_obj.name
+                elif isinstance(net_obj, str):
+                    net_name = net_obj
+                else:
+                    continue
+                    
+                if not net_name or net_name == "":
+                    continue
+                    
+                pins_by_net.setdefault(net_name, []).append({'x': pad['x'], 'y': pad['y'], 'layer': 0, 'pad_name': pad.get('number')})
             
             logger.info(f"Found {len(pins_by_net)} nets with pads")
             
             # Create set of nets that have copper planes (should be skipped)
-            plane_nets = set(zone['net'] for zone in copper_zones if zone.get('filled', True))
+            plane_nets = set()
+            for zone in copper_zones:
+                if zone.get('filled', True):
+                    net_name = zone.get('net')
+                    if net_name and isinstance(net_name, str):
+                        plane_nets.add(net_name)
+            
             if plane_nets:
                 logger.info(f"🏭 Found nets with copper planes: {', '.join(sorted(plane_nets))}")
             
@@ -708,6 +788,7 @@ class KiCadInterface:
             'bounds': bounds,
             'copper_zones': copper_zones,  # Include copper zone information
             'zones': zones_for_visualization,  # Include zones for visualization with filled polygons
+            'copper_pours': zones_for_visualization,  # ALSO provide thermal reliefs as copper_pours for UI rendering
             'all_nets_debug': all_nets_debug,  # For debugging net filtering
             'unrouted_count': len([n for n in nets if not n.get('routed', False)]),
             'routed_count': len([n for n in nets if n.get('routed', False)])
