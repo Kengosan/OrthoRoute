@@ -156,6 +156,11 @@ result = autorouter.route_all_nets(timeout_per_net=10.0)
 | **Track Count** | Minimal | **1,347 tracks** | Production-scale |
 | **Total Length** | Limited | **280.8mm** | Complete routing |
 
+### Real-World Comparison
+- **FreeRouting**: 4% completion in 7 hours → extrapolated 175 hours total
+- **Hand Routing**: Estimated 160+ hours (1 month of work)
+- **OrthoRoute**: **96.4% completion in 4.72 seconds** → estimated 5 seconds total
+
 ### Key Performance Factors
 - **Pre-computed Optimization**: Eliminated O(N×P) pad processing bottleneck
 - **GPU Acceleration**: NVIDIA RTX 5080 with full CUDA utilization  
