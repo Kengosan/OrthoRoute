@@ -125,7 +125,9 @@ class GPUManager:
     def copy_array(self, array) -> Any:
         """Create a copy of an array on the same device"""
         if self.use_gpu:
-            return cp.copy(array)
+            # Ensure array is on GPU first
+            gpu_array = self.to_gpu(array)
+            return cp.copy(gpu_array)
         else:
             import numpy as np
             return np.copy(array)
@@ -138,9 +140,16 @@ class GPUManager:
     
     def to_gpu(self, array) -> Any:
         """Convert CPU array to GPU (no-op if already GPU or GPU disabled)"""
-        if self.use_gpu and not hasattr(array, 'device'):
+        if not self.use_gpu:
+            return array
+            
+        # More reliable CuPy array detection
+        if hasattr(cp, 'ndarray') and isinstance(array, cp.ndarray):
+            # Already a CuPy array
+            return array
+        else:
+            # Convert NumPy array or other type to CuPy array
             return cp.asarray(array)
-        return array
     
     def get_memory_info(self) -> dict:
         """Get current memory usage information"""

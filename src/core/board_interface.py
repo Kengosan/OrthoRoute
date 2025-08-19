@@ -84,12 +84,21 @@ class BoardInterface:
         self._pad_net_cache = net_to_pads
         
         # Build routable nets cache (nets with 2+ pads)
+        # Get existing routing status from KiCad data
+        kicad_nets = self.board_data.get('nets', [])
+        kicad_net_status = {}
+        for net in kicad_nets:
+            net_name = net.get('name', '')
+            kicad_net_status[net_name] = net.get('routed', False)
+        
         for net_name, pad_indices in net_to_pads.items():
             if len(pad_indices) >= 2 and net_name.strip() and net_name not in ['', 'NC']:
+                # Use existing routing status from KiCad data if available
+                already_routed = kicad_net_status.get(net_name, False)
                 self._routable_nets[net_name] = {
                     'pad_indices': pad_indices,
                     'pad_count': len(pad_indices),
-                    'routed': False
+                    'routed': already_routed
                 }
         
         logger.info(f"🏗️ Caches built: {len(net_to_pads)} nets, {len(self._routable_nets)} routable")
@@ -145,10 +154,10 @@ class BoardInterface:
     def get_layer_id(self, layer_name: str) -> int:
         """Convert layer name to KiCad layer ID"""
         layer_map = {
-            'F.Cu': 0,
-            'B.Cu': 31
+            'F.Cu': 3,   # KiCad IPC API uses layer 3 for front copper
+            'B.Cu': 34   # KiCad IPC API uses layer 34 for back copper
         }
-        return layer_map.get(layer_name, 0)
+        return layer_map.get(layer_name, 3)
     
     def is_pad_on_layer(self, pad: Dict, layer: str) -> bool:
         """Check if a pad exists on a specific layer"""
@@ -183,7 +192,7 @@ class BoardInterface:
             'end_y': track.get('end_y', 0),
             'width': track.get('width', 0.25),
             'layer': track.get('layer', 0),
-            'net_name': track.get('net_name', ''),
+            'net_name': track.get('net', ''),  # FIX: Use 'net' field from KiCad interface
             'uuid': track.get('uuid', '')
         }
     
@@ -229,3 +238,51 @@ class BoardInterface:
             'success_rate': (routed_count / len(self._routable_nets)) * 100 if self._routable_nets else 0,
             **self.stats
         }
+    
+    def get_board_outline(self) -> List[Dict]:
+        """Get board outline points for routing boundary"""
+        try:
+            # Try to get board outline from zones or other sources
+            # For now, return a rectangle based on board bounds
+            bounds = self.board_data.get('bounds', (0, 0, 100, 80))
+            min_x, min_y, max_x, max_y = bounds
+            
+            # Return as polygon points
+            return [
+                {'x': min_x, 'y': min_y},
+                {'x': max_x, 'y': min_y},
+                {'x': max_x, 'y': max_y},
+                {'x': min_x, 'y': max_y}
+            ]
+        except Exception as e:
+            logger.warning(f"Could not get board outline: {e}")
+            return []
+    
+    def get_via_geometry(self) -> List[Dict]:
+        """Get existing via geometries for obstacle avoidance"""
+        try:
+            vias = self.board_data.get('vias', [])
+            via_obstacles = []
+            
+            for via in vias:
+                via_obstacles.append({
+                    'x': via['x'],
+                    'y': via['y'],
+                    'diameter': via.get('via_diameter', 0.6),
+                    'drill': via.get('drill_diameter', 0.3)
+                })
+            
+            return via_obstacles
+        except Exception as e:
+            logger.warning(f"Could not get via geometry: {e}")
+            return []
+    
+    def get_board_holes(self) -> List[Dict]:
+        """Get board holes and cutouts for obstacle avoidance"""
+        try:
+            # For now, return empty list - could be enhanced to get actual holes
+            # from board outline or special pads
+            return []
+        except Exception as e:
+            logger.warning(f"Could not get board holes: {e}")
+            return []

@@ -40,6 +40,7 @@ _Testing / examples are the following_:
 - [CSEduino v4](https://github.com/jpralves/cseduino/tree/master/boards/2-layer)
 - [Sacred65 keyboard PCB](https://github.com/LordsBoards/Sacred65)
 - [RP2040 Minimal board](https://datasheets.raspberrypi.com/rp2040/Minimal-KiCAD.zip)
+- [Thinking Machine Backplane](https://github.com/bbenchoff/ThinkinMachine/tree/main/MainController)
 
 ### Main Interface
 
@@ -139,7 +140,7 @@ python build.py --package development
 
 We welcome contributions! Please see [`docs/contributing.md`](docs/contributing.md) for guidelines.
 
-If something's not working or you just don't like it, first please complain. Complaining about free stuff will actually force me to fix it.
+If something's not working or you just don't like it, first please complain. Complaining about free stuff will actually force me to fix it. I would especially like to hear from you if you think it sucks.
 
 ## 📄 License
 

@@ -257,7 +257,8 @@ class KiCadInterface:
                     pos = getattr(p, 'position', None)
                     x = float(getattr(pos, 'x', 0.0)) / 1000000.0 if pos is not None else 0.0  # Convert nm to mm
                     y = float(getattr(pos, 'y', 0.0)) / 1000000.0 if pos is not None else 0.0  # Convert nm to mm
-                    net = getattr(p, 'net', None)
+                    net_obj = getattr(p, 'net', None)
+                    net = getattr(net_obj, 'name', None) if net_obj else None  # Extract net name from Net object
                     num = getattr(p, 'number', None)
                     
                     # Enhanced geometric data from padstack for accurate rendering
@@ -481,9 +482,17 @@ class KiCadInterface:
                     s = (float(getattr(start, 'x', 0.0)) / 1000000.0, float(getattr(start, 'y', 0.0)) / 1000000.0) if start else (0.0, 0.0)  # Convert nm to mm
                     e = (float(getattr(end, 'x', 0.0)) / 1000000.0, float(getattr(end, 'y', 0.0)) / 1000000.0) if end else (0.0, 0.0)  # Convert nm to mm
                     
+                    # Get track width and layer
+                    width = float(getattr(tr, 'width', 200000)) / 1000000.0 if hasattr(tr, 'width') else 0.2  # Convert nm to mm, default 0.2mm
+                    layer = getattr(tr, 'layer', 0)  # Get layer ID
+                    
                     track_data = {
-                        'start': {'x': s[0], 'y': s[1]}, 
-                        'end': {'x': e[0], 'y': e[1]},
+                        'start_x': s[0], 
+                        'start_y': s[1],
+                        'end_x': e[0], 
+                        'end_y': e[1],
+                        'width': width,
+                        'layer': layer,
                         'net': net
                     }
                     tracks.append(track_data)
@@ -497,6 +506,8 @@ class KiCadInterface:
                     logger.warning(f"Track parse error #{i}: {e}")
         except Exception as e:
             logger.error(f"Error getting tracks: {e}")
+
+        logger.info(f"✅ Loaded {len(tracks)} existing tracks from KiCad")
 
         # Vias - with proper coordinate conversion  
         vias = []
@@ -515,8 +526,8 @@ class KiCadInterface:
                     vias.append({
                         'x': x, 
                         'y': y, 
-                        'size': size,
-                        'drill': drill
+                        'via_diameter': size,
+                        'drill_diameter': drill
                     })
                 except Exception as e:
                     logger.warning(f"Via parse error #{i}: {e}")
@@ -735,13 +746,13 @@ class KiCadInterface:
             
         # Collect track coordinates (already in mm)
         for track in tracks:
-            all_x.extend([track['start']['x'], track['end']['x']])
-            all_y.extend([track['start']['y'], track['end']['y']])
+            all_x.extend([track['start_x'], track['end_x']])
+            all_y.extend([track['start_y'], track['end_y']])
             
         # Collect via coordinates (already in mm)
         for via in vias:
-            all_x.extend([via['x'] - via['size']/2, via['x'] + via['size']/2])
-            all_y.extend([via['y'] - via['size']/2, via['y'] + via['size']/2])
+            all_x.extend([via['x'] - via['via_diameter']/2, via['x'] + via['via_diameter']/2])
+            all_y.extend([via['y'] - via['via_diameter']/2, via['y'] + via['via_diameter']/2])
         
         # Collect component positions
         for comp in components:

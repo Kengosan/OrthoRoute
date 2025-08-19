@@ -28,11 +28,27 @@ try:
     from core.gpu_manager import GPUManager
     from core.board_interface import BoardInterface
     from data_structures.grid_config import GridConfig
+    from routing_engines.virtual_copper_generator import VirtualCopperGenerator
 except ImportError:
-    from ..core.drc_rules import DRCRules
-    from ..core.gpu_manager import GPUManager
-    from ..core.board_interface import BoardInterface
-    from ..data_structures.grid_config import GridConfig
+    try:
+        from ..core.drc_rules import DRCRules
+        from ..core.gpu_manager import GPUManager
+        from ..core.board_interface import BoardInterface
+        from ..data_structures.grid_config import GridConfig
+        from .virtual_copper_generator import VirtualCopperGenerator
+    except ImportError:
+        # Handle the case where we're running from the src directory
+        import sys
+        import os
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        src_dir = os.path.dirname(current_dir)
+        if src_dir not in sys.path:
+            sys.path.insert(0, src_dir)
+        from core.drc_rules import DRCRules
+        from core.gpu_manager import GPUManager
+        from core.board_interface import BoardInterface
+        from data_structures.grid_config import GridConfig
+        from routing_engines.virtual_copper_generator import VirtualCopperGenerator
 
 logger = logging.getLogger(__name__)
 
@@ -282,23 +298,31 @@ class BaseRouter(ABC):
         self.track_callback = callback
     
     def _initialize_obstacle_grids(self):
-        """Initialize obstacle grids using Free Routing Space methodology"""
-        logger.info("🗺️ Generating Free Routing Space grids using virtual copper pour methodology...")
+        """Initialize obstacle grids using Virtual Copper Generator methodology"""
+        logger.info("🗺️ Generating obstacle grids using Virtual Copper Generator...")
         
+        # Initialize the virtual copper generator
+        self.virtual_copper_generator = VirtualCopperGenerator(
+            self.board_interface, 
+            self.drc_rules, 
+            self.grid_config
+        )
+        
+        # Generate obstacle grids for all layers using virtual copper methodology
+        self.obstacle_grids = {}
         for layer in self.layers:
-            # Generate Free Routing Space for this layer
-            free_routing_space = self._generate_free_routing_space(layer)
+            logger.info(f"🌟 Generating virtual copper pour for layer {layer}")
+            virtual_copper_grid = self.virtual_copper_generator.generate_virtual_copper_grid(layer)
             
-            # Obstacle grid is the INVERSE of free routing space
+            # Obstacle grid is the INVERSE of virtual copper grid
             # True = obstacle (cannot route), False = free space (can route)
-            if self.gpu_manager.is_gpu_enabled() and hasattr(free_routing_space, 'get'):
-                # GPU array - use CuPy logical operations
-                import cupy as cp
-                obstacle_grid = ~free_routing_space  # Logical NOT using CuPy
-            else:
-                # CPU array - use NumPy logical operations
-                import numpy as np
-                obstacle_grid = ~free_routing_space  # Logical NOT using NumPy
+            import numpy as np
+            obstacle_grid = ~virtual_copper_grid  # Logical NOT using NumPy first
+            
+            # Convert to GPU array if GPU is enabled
+            if self.gpu_manager.is_gpu_enabled():
+                # Convert processed NumPy array to GPU array
+                obstacle_grid = self.gpu_manager.to_gpu(obstacle_grid)
             
             self.obstacle_grids[layer] = obstacle_grid
         
@@ -393,8 +417,18 @@ class BaseRouter(ABC):
         tracks = self.board_interface.get_all_tracks()
         excluded_count = 0
         
+        # Convert layer name to layer ID for comparison
+        layer_id = self.board_interface.get_layer_id(layer)
+        
+        # Debug: Log first few tracks to see their layer values
+        if tracks:
+            logger.debug(f"🔍 Checking tracks for layer {layer} (layer_id={layer_id})")
+            for i, track in enumerate(tracks[:5]):  # Show first 5 tracks
+                track_layer = track.get('layer', 'unknown')
+                logger.debug(f"  Track {i}: layer={track_layer}, net={track.get('net', 'unknown')}")
+        
         for track in tracks:
-            if track.get('layer') == layer:
+            if track.get('layer') == layer_id:
                 # Mark track area as excluded with proper clearance
                 self._mark_line_exclusion(
                     free_space,
@@ -404,7 +438,7 @@ class BaseRouter(ABC):
                 )
                 excluded_count += 1
         
-        logger.debug(f"🚫 Excluded {excluded_count} tracks from free space on {layer}")
+        logger.debug(f"🚫 Excluded {excluded_count} tracks from free space on {layer} (layer_id={layer_id})")
     
     def _exclude_vias_from_free_space(self, free_space, layer: str):
         """Exclude via areas from free space"""
@@ -413,7 +447,7 @@ class BaseRouter(ABC):
         
         for via in vias:
             # Vias affect all layers
-            exclusion_diameter = via['size'] + 2 * self.drc_rules.min_trace_spacing
+            exclusion_diameter = via['via_diameter'] + 2 * self.drc_rules.min_trace_spacing
             self._mark_circular_exclusion(
                 free_space,
                 via['x'], via['y'],

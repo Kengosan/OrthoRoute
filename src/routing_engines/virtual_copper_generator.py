@@ -12,11 +12,29 @@ The virtual copper pour exists only in our GPU routing model.
 """
 
 import logging
+import math
 from typing import Dict, List, Tuple, Optional
 import numpy as np
 
-from ..core.board_interface import BoardInterface
-from ..core.drc_rules import DRCRules
+# Import dependencies with fallback for different import contexts
+try:
+    from core.board_interface import BoardInterface
+    from core.drc_rules import DRCRules
+    from data_structures.grid_config import GridConfig
+except ImportError:
+    try:
+        from ..core.board_interface import BoardInterface
+        from ..core.drc_rules import DRCRules
+        from ..data_structures.grid_config import GridConfig
+    except ImportError:
+        # Absolute import fallback
+        import sys
+        import os
+        src_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        sys.path.insert(0, src_dir)
+        from core.board_interface import BoardInterface
+        from core.drc_rules import DRCRules
+        from data_structures.grid_config import GridConfig
 
 logger = logging.getLogger(__name__)
 
@@ -113,6 +131,9 @@ class VirtualCopperGenerator:
                 logger.warning("⚠️ No valid board outline found, using full grid")
                 return grid  # Keep full grid as routable
             
+            # Convert dict format to tuple format for _point_in_polygon
+            polygon_points = [(point['x'], point['y']) for point in outline_points]
+            
             # For each grid cell, check if it's inside the board outline
             height, width = grid.shape
             
@@ -122,7 +143,7 @@ class VirtualCopperGenerator:
                     world_x, world_y = self.grid_config.grid_to_world(gx, gy)
                     
                     # Simple point-in-polygon test using winding number
-                    if not self._point_in_polygon(world_x, world_y, outline_points):
+                    if not self._point_in_polygon(world_x, world_y, polygon_points):
                         grid[gy, gx] = False  # Outside board = not routable
             
             return grid
@@ -134,22 +155,42 @@ class VirtualCopperGenerator:
     def _apply_pad_keepouts(self, grid: np.ndarray, layer: str) -> np.ndarray:
         """Apply keepout zones around all pads"""
         try:
+            logger.info(f"🚀 Starting pad keepouts for {layer}")
             pads = self.board_interface.get_all_pads()
+            logger.info(f"🚀 Got {len(pads)} total pads")
             height, width = grid.shape
             
             pad_count = 0
+            skipped_count = 0
             for pad in pads:
                 # Check if pad affects this layer
                 if not self._pad_affects_layer(pad, layer):
+                    skipped_count += 1
                     continue
                 
-                # Get pad position and size
-                pad_x, pad_y = self.board_interface.get_pad_center(pad)
-                pad_size = self.board_interface.get_pad_size(pad)
+                # Get pad geometry using the correct method
+                pad_geom = self.board_interface.get_pad_geometry(pad)
+                pad_x = pad_geom['x']
+                pad_y = pad_geom['y']
+                size_x = pad_geom['size_x']
+                size_y = pad_geom['size_y']
                 
-                # Calculate keepout radius (pad size + clearance)
-                pad_radius = max(pad_size.get('width', 0), pad_size.get('height', 0)) / 2.0
-                keepout_radius = pad_radius + self.drc_rules.min_trace_spacing
+                # Calculate keepout radius with enhanced logic for fine-pitch components
+                pad_radius = max(size_x, size_y) / 2.0
+                
+                # Enhanced keepout calculation for fine-pitch components
+                base_clearance = self.drc_rules.min_trace_spacing
+                
+                # Detect fine-pitch components and apply enhanced spacing
+                if self._is_fine_pitch_component(pad, pads):
+                    # For fine-pitch components (IC packages), use 1.5x clearance instead of 2x
+                    # This provides better clearance while not being overly restrictive
+                    enhanced_clearance = base_clearance * 1.5
+                    keepout_radius = pad_radius + enhanced_clearance
+                    logger.debug(f"Fine-pitch component detected: enhanced clearance {enhanced_clearance:.3f}mm")
+                else:
+                    # Standard components use normal clearance
+                    keepout_radius = pad_radius + base_clearance
                 
                 # Convert to grid coordinates
                 pad_gx, pad_gy = self.grid_config.world_to_grid(pad_x, pad_y)
@@ -169,12 +210,87 @@ class VirtualCopperGenerator:
                 
                 pad_count += 1
             
-            logger.debug(f"📦 Applied keepouts for {pad_count} pads on {layer}")
+            logger.info(f"📦 Applied keepouts for {pad_count} pads on {layer} (skipped {skipped_count})")
             return grid
             
         except Exception as e:
             logger.error(f"❌ Error applying pad keepouts: {e}")
             return grid
+    
+    def _is_fine_pitch_component(self, target_pad, all_pads) -> bool:
+        """
+        Detect if a pad belongs to a fine-pitch component (like QFN/BGA ICs)
+        by analyzing the spacing to nearby pads from the same component.
+        
+        Args:
+            target_pad: The pad to analyze
+            all_pads: List of all pads on the board
+            
+        Returns:
+            bool: True if this is a fine-pitch component
+        """
+        try:
+            # Get target pad geometry
+            target_geom = self.board_interface.get_pad_geometry(target_pad)
+            target_x, target_y = target_geom['x'], target_geom['y']
+            target_size = max(target_geom['size_x'], target_geom['size_y'])
+            
+            # Simple heuristic: if pad is smaller than 0.7mm, likely fine-pitch
+            # This catches QFN, BGA, and other dense IC packages
+            if target_size < 0.7:  # mm
+                logger.debug(f"Small pad detected: {target_size:.3f}mm - treating as fine-pitch")
+                return True
+            
+            # Also check pad density in local area
+            nearby_pads = 0
+            search_radius = 3.0  # mm - smaller search radius for local density
+            
+            for pad in all_pads:
+                if pad == target_pad:  # Skip self
+                    continue
+                    
+                # Calculate distance between pads
+                pad_geom = self.board_interface.get_pad_geometry(pad)
+                pad_x, pad_y = pad_geom['x'], pad_geom['y']
+                distance = math.sqrt((pad_x - target_x)**2 + (pad_y - target_y)**2)
+                
+                # Count nearby pads within search radius
+                if distance <= search_radius:
+                    nearby_pads += 1
+            
+            # If there are many pads nearby (>6), likely a dense IC package
+            if nearby_pads > 6:
+                logger.debug(f"Dense component detected: {nearby_pads} pads within {search_radius}mm - treating as fine-pitch")
+                return True
+            
+            return False
+            
+        except Exception as e:
+            logger.warning(f"⚠️ Error in fine-pitch detection: {e}")
+            return False  # Default to standard spacing on error
+    
+    def _get_pad_component(self, pad) -> Optional[str]:
+        """Get the component reference designator for a pad"""
+        try:
+            # Try to get component from pad object
+            if hasattr(pad, 'GetParentFootprint'):
+                footprint = pad.GetParentFootprint()
+                if footprint and hasattr(footprint, 'GetReference'):
+                    return footprint.GetReference()
+            elif hasattr(pad, 'GetParent'):
+                parent = pad.GetParent()
+                if parent and hasattr(parent, 'GetReference'):
+                    return parent.GetReference()
+            
+            # Fallback: try board interface method if available
+            if hasattr(self.board_interface, 'get_pad_component'):
+                return self.board_interface.get_pad_component(pad)
+                
+            return None
+            
+        except Exception as e:
+            logger.debug(f"Could not get component for pad: {e}")
+            return None
     
     def _apply_track_obstacles(self, grid: np.ndarray, layer: str) -> np.ndarray:
         """Apply obstacles for existing tracks"""
@@ -190,17 +306,19 @@ class VirtualCopperGenerator:
                 if track_geom['layer'] != layer_id:
                     continue
                 
-                # Mark track area as obstacle using line drawing
+                # Mark track area as obstacle using line drawing with clearance
+                # Add required clearance to track width for proper DRC compliance
+                track_width_with_clearance = track_geom['width'] + (2 * self.drc_rules.min_trace_spacing)
                 self._mark_line_obstacle(
                     grid,
                     track_geom['start_x'], track_geom['start_y'],
                     track_geom['end_x'], track_geom['end_y'],
-                    track_geom['width']
+                    track_width_with_clearance
                 )
                 
                 track_count += 1
             
-            logger.debug(f"🛤️ Applied {track_count} track obstacles on {layer}")
+            logger.info(f"🛤️ Applied {track_count} track obstacles on {layer}")
             return grid
             
         except Exception as e:
@@ -215,7 +333,13 @@ class VirtualCopperGenerator:
             
             via_count = 0
             for via in vias:
-                via_geom = self.board_interface.get_via_geometry(via)
+                # Via already contains geometry information
+                via_geom = {
+                    'x': via['x'],
+                    'y': via['y'],
+                    'diameter': via.get('via_diameter', 0.6),
+                    'drill': via.get('drill_diameter', 0.3)
+                }
                 
                 # Check if via affects this layer
                 if not self._via_affects_layer(via_geom, layer_id):
