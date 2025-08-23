@@ -11,7 +11,16 @@
       "WebFetch(domain:dev-docs.kicad.org)",
       "WebFetch(domain:forum.kicad.info)",
       "WebFetch(domain:adamws.github.io)",
-      "WebFetch(domain:github.com)"
+      "WebFetch(domain:github.com)",
+      "Bash(timeout 5 python orthoroute_main.py gui)",
+      "Bash(timeout 3 python src/orthoroute_plugin.py)",
+      "Bash(timeout 3 python orthoroute_main.py plugin)",
+      "Bash(timeout 10 python main.py plugin)",
+      "Bash(timeout 15 python main.py plugin)",
+      "Bash(timeout 20 python main.py plugin)",
+      "Bash(timeout 10 python:*)",
+      "Bash(timeout 25 python main.py plugin)",
+      "Bash(rg:*)"
     ],
     "deny": [],
     "ask": [],

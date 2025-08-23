@@ -1,0 +1,1077 @@
+ORTHOROUTE VISUALIZATION DEBUG LOG
+Session: 20250822_220529
+Timestamp: 2025-08-22 22:05:29.910080
+================================================================================
+
+[22:05:29.910] RENDER FRAME
+------------------------------
+Zoom Level: 2.8037
+Render Counts:
+  airwires_drawn: 2803
+  max_airwires_allowed: 2803
+  total_airwires_available: 8192
+  zoom_level: 2.8037383177570097
+
+[22:05:29.911] RENDER FRAME
+------------------------------
+Zoom Level: 2.8037
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 2.8037383177570097
+  min_pad_size: 0.35666666666666663
+  total_pads_available: 17649
+
+[22:05:30.091] RENDER FRAME
+------------------------------
+Zoom Level: 3.5858
+Render Counts:
+  airwires_drawn: 3585
+  max_airwires_allowed: 3585
+  total_airwires_available: 8192
+  zoom_level: 3.5858337432365968
+
+[22:05:30.092] RENDER FRAME
+------------------------------
+Zoom Level: 3.5858
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 3.5858337432365968
+  min_pad_size: 0.278875171467764
+  total_pads_available: 17649
+
+[22:05:31.726] RENDER FRAME
+------------------------------
+Zoom Level: 3.5858
+Render Counts:
+  airwires_drawn: 3585
+  max_airwires_allowed: 3585
+  total_airwires_available: 8192
+  zoom_level: 3.5858337432365968
+
+[22:05:31.727] RENDER FRAME
+------------------------------
+Zoom Level: 3.5858
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 3.5858337432365968
+  min_pad_size: 0.278875171467764
+  total_pads_available: 17649
+
+[22:05:35.329] RENDER FRAME
+------------------------------
+Zoom Level: 3.5858
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 3.5858337432365968
+  min_pad_size: 0.278875171467764
+  total_pads_available: 17649
+
+[22:05:38.126] RENDER FRAME
+------------------------------
+Zoom Level: 3.5858
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 3.5858337432365968
+  min_pad_size: 0.278875171467764
+  total_pads_available: 17649
+
+[22:05:42.311] RENDER FRAME
+------------------------------
+Zoom Level: 3.5858
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 3.5858337432365968
+  min_pad_size: 0.278875171467764
+  total_pads_available: 17649
+
+[22:05:42.429] RENDER FRAME
+------------------------------
+Zoom Level: 3.5858
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 3.5858337432365968
+  min_pad_size: 0.278875171467764
+  total_pads_available: 17649
+
+[22:05:42.550] RENDER FRAME
+------------------------------
+Zoom Level: 3.5858
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 3.5858337432365968
+  min_pad_size: 0.278875171467764
+  total_pads_available: 17649
+
+[22:05:42.673] RENDER FRAME
+------------------------------
+Zoom Level: 3.5858
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 3.5858337432365968
+  min_pad_size: 0.278875171467764
+  total_pads_available: 17649
+
+[22:05:42.793] RENDER FRAME
+------------------------------
+Zoom Level: 3.5858
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 3.5858337432365968
+  min_pad_size: 0.278875171467764
+  total_pads_available: 17649
+
+[22:05:42.915] RENDER FRAME
+------------------------------
+Zoom Level: 3.5858
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 3.5858337432365968
+  min_pad_size: 0.278875171467764
+  total_pads_available: 17649
+
+[22:05:43.042] RENDER FRAME
+------------------------------
+Zoom Level: 3.5858
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 3.5858337432365968
+  min_pad_size: 0.278875171467764
+  total_pads_available: 17649
+
+[22:05:43.166] RENDER FRAME
+------------------------------
+Zoom Level: 3.5858
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 3.5858337432365968
+  min_pad_size: 0.278875171467764
+  total_pads_available: 17649
+
+[22:05:59.382] RENDER FRAME
+------------------------------
+Zoom Level: 3.5858
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 3.5858337432365968
+  min_pad_size: 0.278875171467764
+  total_pads_available: 17649
+
+[22:05:59.534] RENDER FRAME
+------------------------------
+Zoom Level: 3.5858
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 3.5858337432365968
+  min_pad_size: 0.278875171467764
+  total_pads_available: 17649
+
+[22:05:59.698] RENDER FRAME
+------------------------------
+Zoom Level: 3.5858
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 3.5858337432365968
+  min_pad_size: 0.278875171467764
+  total_pads_available: 17649
+
+[22:05:59.863] RENDER FRAME
+------------------------------
+Zoom Level: 3.5858
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 3.5858337432365968
+  min_pad_size: 0.278875171467764
+  total_pads_available: 17649
+
+[22:06:00.525] RENDER FRAME
+------------------------------
+Zoom Level: 3.5858
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 3.5858337432365968
+  min_pad_size: 0.278875171467764
+  total_pads_available: 17649
+
+[22:06:01.141] RENDER FRAME
+------------------------------
+Zoom Level: 3.5858
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 3.5858337432365968
+  min_pad_size: 0.278875171467764
+  total_pads_available: 17649
+
+[22:06:02.292] RENDER FRAME
+------------------------------
+Zoom Level: 3.5858
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 3.5858337432365968
+  min_pad_size: 0.278875171467764
+  total_pads_available: 17649
+
+[22:06:02.679] RENDER FRAME
+------------------------------
+Zoom Level: 3.5858
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 3.5858337432365968
+  min_pad_size: 0.278875171467764
+  total_pads_available: 17649
+
+[22:06:03.194] RENDER FRAME
+------------------------------
+Zoom Level: 3.5858
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 3.5858337432365968
+  min_pad_size: 0.278875171467764
+  total_pads_available: 17649
+
+[22:06:05.251] RENDER FRAME
+------------------------------
+Zoom Level: 3.5858
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 3.5858337432365968
+  min_pad_size: 0.278875171467764
+  total_pads_available: 17649
+
+[22:06:05.534] RENDER FRAME
+------------------------------
+Zoom Level: 3.5858
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 3.5858337432365968
+  min_pad_size: 0.278875171467764
+  total_pads_available: 17649
+
+[22:06:05.659] RENDER FRAME
+------------------------------
+Zoom Level: 3.5858
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 3.5858337432365968
+  min_pad_size: 0.278875171467764
+  total_pads_available: 17649
+
+[22:06:05.935] RENDER FRAME
+------------------------------
+Zoom Level: 3.5858
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 3.5858337432365968
+  min_pad_size: 0.278875171467764
+  total_pads_available: 17649
+
+[22:06:26.163] RENDER FRAME
+------------------------------
+Zoom Level: 3.5858
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 3.5858337432365968
+  min_pad_size: 0.278875171467764
+  total_pads_available: 17649
+
+[22:06:26.322] RENDER FRAME
+------------------------------
+Zoom Level: 3.5858
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 3.5858337432365968
+  min_pad_size: 0.278875171467764
+  total_pads_available: 17649
+
+[22:06:26.487] RENDER FRAME
+------------------------------
+Zoom Level: 3.5858
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 3.5858337432365968
+  min_pad_size: 0.278875171467764
+  total_pads_available: 17649
+
+[22:06:27.290] RENDER FRAME
+------------------------------
+Zoom Level: 3.5858
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 3.5858337432365968
+  min_pad_size: 0.278875171467764
+  total_pads_available: 17649
+
+[22:06:28.071] RENDER FRAME
+------------------------------
+Zoom Level: 3.5858
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 3.5858337432365968
+  min_pad_size: 0.278875171467764
+  total_pads_available: 17649
+
+[22:06:28.861] RENDER FRAME
+------------------------------
+Zoom Level: 3.5858
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 3.5858337432365968
+  min_pad_size: 0.278875171467764
+  total_pads_available: 17649
+
+[22:06:29.038] RENDER FRAME
+------------------------------
+Zoom Level: 3.5858
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 3.5858337432365968
+  min_pad_size: 0.278875171467764
+  total_pads_available: 17649
+
+[22:06:29.483] RENDER FRAME
+------------------------------
+Zoom Level: 3.5858
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 3.5858337432365968
+  min_pad_size: 0.278875171467764
+  total_pads_available: 17649
+
+[22:06:31.270] RENDER FRAME
+------------------------------
+Zoom Level: 3.5858
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 3.5858337432365968
+  min_pad_size: 0.278875171467764
+  total_pads_available: 17649
+
+[22:06:32.985] RENDER FRAME
+------------------------------
+Zoom Level: 3.5858
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 3.5858337432365968
+  min_pad_size: 0.278875171467764
+  total_pads_available: 17649
+
+[22:06:34.235] RENDER FRAME
+------------------------------
+Zoom Level: 3.5858
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 3.5858337432365968
+  min_pad_size: 0.278875171467764
+  total_pads_available: 17649
+
+[22:06:35.650] RENDER FRAME
+------------------------------
+Zoom Level: 3.5858
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 3.5858337432365968
+  min_pad_size: 0.278875171467764
+  total_pads_available: 17649
+
+[22:06:37.031] RENDER FRAME
+------------------------------
+Zoom Level: 3.5858
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 3.5858337432365968
+  min_pad_size: 0.278875171467764
+  total_pads_available: 17649
+
+[22:06:37.247] RENDER FRAME
+------------------------------
+Zoom Level: 3.5858
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 3.5858337432365968
+  min_pad_size: 0.278875171467764
+  total_pads_available: 17649
+
+[22:06:37.486] RENDER FRAME
+------------------------------
+Zoom Level: 3.5858
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 3.5858337432365968
+  min_pad_size: 0.278875171467764
+  total_pads_available: 17649
+
+[22:06:50.530] RENDER FRAME
+------------------------------
+Zoom Level: 4.3030
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 4.303000491883916
+  min_pad_size: 0.2323959762231367
+  total_pads_available: 17649
+
+[22:06:50.659] RENDER FRAME
+------------------------------
+Zoom Level: 5.1636
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 5.163600590260699
+  min_pad_size: 0.1936633135192806
+  total_pads_available: 17649
+
+[22:06:50.796] RENDER FRAME
+------------------------------
+Zoom Level: 6.1963
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 6.196320708312839
+  min_pad_size: 0.16138609459940048
+  total_pads_available: 17649
+
+[22:06:50.925] RENDER FRAME
+------------------------------
+Zoom Level: 7.4356
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 7.435584849975406
+  min_pad_size: 0.13448841216616708
+  total_pads_available: 17649
+
+[22:06:51.451] RENDER FRAME
+------------------------------
+Zoom Level: 8.9227
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 8.922701819970486
+  min_pad_size: 0.11207367680513924
+  total_pads_available: 17649
+
+[22:06:51.576] RENDER FRAME
+------------------------------
+Zoom Level: 10.7072
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 10.707242183964583
+  min_pad_size: 0.09339473067094937
+  total_pads_available: 17649
+
+[22:06:51.699] RENDER FRAME
+------------------------------
+Zoom Level: 12.8487
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 12.8486906207575
+  min_pad_size: 0.07782894222579115
+  total_pads_available: 17649
+
+[22:06:52.226] RENDER FRAME
+------------------------------
+Zoom Level: 15.4184
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 15.418428744908999
+  min_pad_size: 0.06485745185482596
+  total_pads_available: 17649
+
+[22:06:52.346] RENDER FRAME
+------------------------------
+Zoom Level: 18.5021
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 18.502114493890797
+  min_pad_size: 0.0540478765456883
+  total_pads_available: 17649
+
+[22:06:52.465] RENDER FRAME
+------------------------------
+Zoom Level: 22.2025
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 22.202537392668955
+  min_pad_size: 0.04503989712140692
+  total_pads_available: 17649
+
+[22:06:53.269] RENDER FRAME
+------------------------------
+Zoom Level: 22.2025
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 22.202537392668955
+  min_pad_size: 0.04503989712140692
+  total_pads_available: 17649
+
+[22:06:53.402] RENDER FRAME
+------------------------------
+Zoom Level: 22.2025
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 22.202537392668955
+  min_pad_size: 0.04503989712140692
+  total_pads_available: 17649
+
+[22:06:53.535] RENDER FRAME
+------------------------------
+Zoom Level: 22.2025
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 22.202537392668955
+  min_pad_size: 0.04503989712140692
+  total_pads_available: 17649
+
+[22:06:53.669] RENDER FRAME
+------------------------------
+Zoom Level: 22.2025
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 22.202537392668955
+  min_pad_size: 0.04503989712140692
+  total_pads_available: 17649
+
+[22:06:53.803] RENDER FRAME
+------------------------------
+Zoom Level: 22.2025
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 22.202537392668955
+  min_pad_size: 0.04503989712140692
+  total_pads_available: 17649
+
+[22:06:53.939] RENDER FRAME
+------------------------------
+Zoom Level: 22.2025
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 22.202537392668955
+  min_pad_size: 0.04503989712140692
+  total_pads_available: 17649
+
+[22:06:54.631] RENDER FRAME
+------------------------------
+Zoom Level: 26.6430
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 26.643044871202743
+  min_pad_size: 0.03753324760117244
+  total_pads_available: 17649
+
+[22:06:54.764] RENDER FRAME
+------------------------------
+Zoom Level: 31.9717
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 31.971653845443292
+  min_pad_size: 0.031277706334310366
+  total_pads_available: 17649
+
+[22:06:54.898] RENDER FRAME
+------------------------------
+Zoom Level: 38.3660
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 38.365984614531946
+  min_pad_size: 0.026064755278591974
+  total_pads_available: 17649
+
+[22:06:55.391] RENDER FRAME
+------------------------------
+Zoom Level: 46.0392
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 46.03918153743833
+  min_pad_size: 0.021720629398826647
+  total_pads_available: 17649
+
+[22:06:55.525] RENDER FRAME
+------------------------------
+Zoom Level: 55.2470
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 55.247017844926
+  min_pad_size: 0.018100524499022205
+  total_pads_available: 17649
+
+[22:06:55.660] RENDER FRAME
+------------------------------
+Zoom Level: 66.2964
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 66.29642141391119
+  min_pad_size: 0.015083770415851839
+  total_pads_available: 17649
+
+[22:06:56.763] RENDER FRAME
+------------------------------
+Zoom Level: 55.2470
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 55.24701784492599
+  min_pad_size: 0.01810052449902221
+  total_pads_available: 17649
+
+[22:06:57.295] RENDER FRAME
+------------------------------
+Zoom Level: 46.0392
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 46.03918153743833
+  min_pad_size: 0.021720629398826647
+  total_pads_available: 17649
+
+[22:06:57.428] RENDER FRAME
+------------------------------
+Zoom Level: 38.3660
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 38.365984614531946
+  min_pad_size: 0.026064755278591974
+  total_pads_available: 17649
+
+[22:06:57.938] RENDER FRAME
+------------------------------
+Zoom Level: 31.9717
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 31.97165384544329
+  min_pad_size: 0.031277706334310366
+  total_pads_available: 17649
+
+[22:06:58.501] RENDER FRAME
+------------------------------
+Zoom Level: 26.6430
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 26.64304487120274
+  min_pad_size: 0.037533247601172444
+  total_pads_available: 17649
+
+[22:06:58.951] RENDER FRAME
+------------------------------
+Zoom Level: 22.2025
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 22.20253739266895
+  min_pad_size: 0.04503989712140693
+  total_pads_available: 17649
+
+[22:07:08.337] RENDER FRAME
+------------------------------
+Zoom Level: 18.5021
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 18.502114493890794
+  min_pad_size: 0.05404787654568831
+  total_pads_available: 17649
+
+[22:07:08.459] RENDER FRAME
+------------------------------
+Zoom Level: 15.4184
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 15.418428744908995
+  min_pad_size: 0.06485745185482597
+  total_pads_available: 17649
+
+[22:07:08.581] RENDER FRAME
+------------------------------
+Zoom Level: 12.8487
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 12.848690620757496
+  min_pad_size: 0.07782894222579116
+  total_pads_available: 17649
+
+[22:07:08.701] RENDER FRAME
+------------------------------
+Zoom Level: 10.7072
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 10.707242183964581
+  min_pad_size: 0.09339473067094939
+  total_pads_available: 17649
+
+[22:07:09.013] RENDER FRAME
+------------------------------
+Zoom Level: 8.9227
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 8.922701819970484
+  min_pad_size: 0.11207367680513927
+  total_pads_available: 17649
+
+[22:07:09.137] RENDER FRAME
+------------------------------
+Zoom Level: 7.4356
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 7.435584849975404
+  min_pad_size: 0.1344884121661671
+  total_pads_available: 17649
+
+[22:07:09.262] RENDER FRAME
+------------------------------
+Zoom Level: 6.1963
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 6.196320708312837
+  min_pad_size: 0.16138609459940054
+  total_pads_available: 17649
+
+[22:07:18.966] RENDER FRAME
+------------------------------
+Zoom Level: 6.1963
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 6.196320708312837
+  min_pad_size: 0.16138609459940054
+  total_pads_available: 17649
+
+[22:08:01.888] RENDER FRAME
+------------------------------
+Zoom Level: 6.1963
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 6.196320708312837
+  min_pad_size: 0.16138609459940054
+  total_pads_available: 17649
+
+[22:08:04.667] RENDER FRAME
+------------------------------
+Zoom Level: 6.1963
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 6.196320708312837
+  min_pad_size: 0.16138609459940054
+  total_pads_available: 17649
+
+[22:08:21.934] RENDER FRAME
+------------------------------
+Zoom Level: 7.4356
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 7.435584849975404
+  min_pad_size: 0.1344884121661671
+  total_pads_available: 17649
+
+[22:08:22.063] RENDER FRAME
+------------------------------
+Zoom Level: 8.9227
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 8.922701819970484
+  min_pad_size: 0.11207367680513927
+  total_pads_available: 17649
+
+[22:08:22.193] RENDER FRAME
+------------------------------
+Zoom Level: 10.7072
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 10.707242183964581
+  min_pad_size: 0.09339473067094939
+  total_pads_available: 17649
+
+[22:08:22.633] RENDER FRAME
+------------------------------
+Zoom Level: 12.8487
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 12.848690620757496
+  min_pad_size: 0.07782894222579116
+  total_pads_available: 17649
+
+[22:08:22.757] RENDER FRAME
+------------------------------
+Zoom Level: 15.4184
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 15.418428744908995
+  min_pad_size: 0.06485745185482597
+  total_pads_available: 17649
+
+[22:08:22.885] RENDER FRAME
+------------------------------
+Zoom Level: 18.5021
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 18.502114493890794
+  min_pad_size: 0.05404787654568831
+  total_pads_available: 17649
+
+[22:08:25.455] RENDER FRAME
+------------------------------
+Zoom Level: 18.5021
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 18.502114493890794
+  min_pad_size: 0.05404787654568831
+  total_pads_available: 17649
+
+[22:08:25.579] RENDER FRAME
+------------------------------
+Zoom Level: 18.5021
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 18.502114493890794
+  min_pad_size: 0.05404787654568831
+  total_pads_available: 17649
+
+[22:08:30.234] RENDER FRAME
+------------------------------
+Zoom Level: 22.2025
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 22.20253739266895
+  min_pad_size: 0.04503989712140693
+  total_pads_available: 17649
+
+[22:08:30.377] RENDER FRAME
+------------------------------
+Zoom Level: 26.6430
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 26.64304487120274
+  min_pad_size: 0.037533247601172444
+  total_pads_available: 17649
+
+[22:08:30.511] RENDER FRAME
+------------------------------
+Zoom Level: 31.9717
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 31.971653845443285
+  min_pad_size: 0.03127770633431037
+  total_pads_available: 17649
+
+[22:08:30.818] RENDER FRAME
+------------------------------
+Zoom Level: 38.3660
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 38.36598461453194
+  min_pad_size: 0.026064755278591978
+  total_pads_available: 17649
+
+[22:08:30.950] RENDER FRAME
+------------------------------
+Zoom Level: 46.0392
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 46.039181537438324
+  min_pad_size: 0.02172062939882665
+  total_pads_available: 17649
+
+[22:08:31.082] RENDER FRAME
+------------------------------
+Zoom Level: 55.2470
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 55.247017844925985
+  min_pad_size: 0.01810052449902221
+  total_pads_available: 17649
+
+[22:08:32.017] RENDER FRAME
+------------------------------
+Zoom Level: 66.2964
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 66.29642141391118
+  min_pad_size: 0.015083770415851842
+  total_pads_available: 17649
+
+[22:08:32.153] RENDER FRAME
+------------------------------
+Zoom Level: 79.5557
+Render Counts:
+  pads_processed: 49
+  pads_drawn: 50
+  max_pads: 17649
+  zoom_level: 79.55570569669341
+  min_pad_size: 0.012569808679876535
+  total_pads_available: 17649
+

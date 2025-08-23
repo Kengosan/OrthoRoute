@@ -1,0 +1,717 @@
+ORTHOROUTE ROUTING ATTEMPTS DEBUG LOG
+Session: 20250822_220529
+Timestamp: 2025-08-22 22:05:29.909580
+================================================================================
+
+ROUTING GRID ANALYSIS
+----------------------------------------
+Grid Size: 403 x 513 x 12
+Grid Pitch: 0.4 mm
+World Bounds: (96.33, 32.79) to (257.37, 237.64)
+Obstacles per layer:
+  0: 93418 obstacles
+  1: 0 obstacles
+  2: 0 obstacles
+  3: 0 obstacles
+  4: 0 obstacles
+  5: 0 obstacles
+  6: 0 obstacles
+  7: 0 obstacles
+  8: 0 obstacles
+  9: 0 obstacles
+  10: 0 obstacles
+  11: 0 obstacles
+Layer directions:
+  F.Cu: H
+  In1.Cu: H
+  In2.Cu: V
+  In3.Cu: H
+  In4.Cu: V
+  In5.Cu: H
+  In6.Cu: V
+  In7.Cu: H
+  In8.Cu: V
+  In9.Cu: H
+  In10.Cu: V
+  B.Cu: V
+
+[22:05:59.508] ESCAPE ATTEMPT: Net 1
+PAD: pos=(218.155, 153.407), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(304, 298)
+  Escape Track 0: (218.155,153.407) -> (217.930,151.990), layer=F.Cu, length=1.435
+
+[22:05:59.512] ENTRY ATTEMPT: Net 1
+PAD: pos=(218.155, 145.708), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(304, 285)
+  Entry Track 0: (217.930,146.790) -> (218.155,145.708), layer=F.Cu, length=1.106
+
+[22:05:59.659] ESCAPE ATTEMPT: Net 2
+PAD: pos=(218.155, 77.207), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(304, 108)
+  Escape Track 0: (218.155,77.207) -> (217.930,75.990), layer=F.Cu, length=1.238
+
+[22:05:59.662] ENTRY ATTEMPT: Net 2
+PAD: pos=(218.155, 69.507), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(304, 94)
+  Entry Track 0: (217.930,70.390) -> (218.155,69.507), layer=F.Cu, length=0.911
+
+[22:05:59.823] ESCAPE ATTEMPT: Net 3
+PAD: pos=(218.155, 94.907), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(304, 158)
+  Escape Track 0: (218.155,94.907) -> (217.930,95.990), layer=F.Cu, length=1.106
+
+[22:05:59.830] ENTRY ATTEMPT: Net 3
+PAD: pos=(218.155, 102.608), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(304, 171)
+  Entry Track 0: (217.930,101.190) -> (218.155,102.608), layer=F.Cu, length=1.435
+
+[22:05:59.990] ESCAPE ATTEMPT: Net 4
+PAD: pos=(217.755, 153.407), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(303, 296)
+  Escape Track 0: (217.755,153.407) -> (217.530,151.190), layer=F.Cu, length=2.229
+
+[22:05:59.996] ENTRY ATTEMPT: Net 4
+PAD: pos=(216.955, 145.708), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(301, 285)
+  Entry Track 0: (216.730,146.790) -> (216.955,145.708), layer=F.Cu, length=1.106
+
+[22:06:00.652] ESCAPE ATTEMPT: Net 5
+PAD: pos=(217.755, 77.207), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(303, 106)
+  Escape Track 0: (217.755,77.207) -> (217.530,75.190), layer=F.Cu, length=2.030
+
+[22:06:00.655] ENTRY ATTEMPT: Net 5
+PAD: pos=(216.955, 69.507), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(301, 94)
+  Entry Track 0: (216.730,70.390) -> (216.955,69.507), layer=F.Cu, length=0.911
+
+[22:06:01.267] ESCAPE ATTEMPT: Net 6
+PAD: pos=(216.955, 94.907), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(301, 158)
+  Escape Track 0: (216.955,94.907) -> (216.730,95.990), layer=F.Cu, length=1.106
+
+[22:06:01.270] ENTRY ATTEMPT: Net 6
+PAD: pos=(217.755, 102.608), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(303, 169)
+  Entry Track 0: (217.530,100.390) -> (217.755,102.608), layer=F.Cu, length=2.229
+
+[22:06:02.415] ESCAPE ATTEMPT: Net 7
+PAD: pos=(217.355, 153.407), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(302, 298)
+  Escape Track 0: (217.355,153.407) -> (217.130,151.990), layer=F.Cu, length=1.435
+
+[22:06:02.420] ENTRY ATTEMPT: Net 7
+PAD: pos=(215.755, 145.708), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(298, 285)
+  Entry Track 0: (215.530,146.790) -> (215.755,145.708), layer=F.Cu, length=1.106
+
+[22:06:02.806] ESCAPE ATTEMPT: Net 8
+PAD: pos=(217.355, 77.207), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(302, 108)
+  Escape Track 0: (217.355,77.207) -> (217.130,75.990), layer=F.Cu, length=1.238
+
+[22:06:02.810] ENTRY ATTEMPT: Net 8
+PAD: pos=(215.755, 69.507), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(298, 94)
+  Entry Track 0: (215.530,70.390) -> (215.755,69.507), layer=F.Cu, length=0.911
+
+[22:06:03.320] ESCAPE ATTEMPT: Net 9
+PAD: pos=(215.755, 94.907), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(298, 158)
+  Escape Track 0: (215.755,94.907) -> (215.530,95.990), layer=F.Cu, length=1.106
+
+[22:06:03.327] ENTRY ATTEMPT: Net 9
+PAD: pos=(217.355, 102.608), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(302, 171)
+  Entry Track 0: (217.130,101.190) -> (217.355,102.608), layer=F.Cu, length=1.435
+
+[22:06:05.379] ESCAPE ATTEMPT: Net 10
+PAD: pos=(216.955, 153.407), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(301, 296)
+  Escape Track 0: (216.955,153.407) -> (216.730,151.190), layer=F.Cu, length=2.229
+
+[22:06:05.385] ENTRY ATTEMPT: Net 10
+PAD: pos=(214.555, 145.708), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(295, 285)
+  Entry Track 0: (214.330,146.790) -> (214.555,145.708), layer=F.Cu, length=1.106
+
+[22:06:05.785] ESCAPE ATTEMPT: Net 11
+PAD: pos=(216.955, 77.207), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(301, 106)
+  Escape Track 0: (216.955,77.207) -> (216.730,75.190), layer=F.Cu, length=2.030
+
+[22:06:05.789] ENTRY ATTEMPT: Net 11
+PAD: pos=(214.555, 69.507), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(295, 94)
+  Entry Track 0: (214.330,70.390) -> (214.555,69.507), layer=F.Cu, length=0.911
+
+[22:06:06.064] ESCAPE ATTEMPT: Net 12
+PAD: pos=(214.555, 94.907), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(295, 158)
+  Escape Track 0: (214.555,94.907) -> (214.330,95.990), layer=F.Cu, length=1.106
+
+[22:06:06.069] ENTRY ATTEMPT: Net 12
+PAD: pos=(216.955, 102.608), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(301, 169)
+  Entry Track 0: (216.730,100.390) -> (216.955,102.608), layer=F.Cu, length=2.229
+
+[22:06:11.081] ESCAPE ATTEMPT: Net 12
+PAD: pos=(214.555, 94.907), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(295, 158)
+  Escape Track 0: (214.555,94.907) -> (214.330,95.990), layer=F.Cu, length=1.106
+
+[22:06:11.084] ENTRY ATTEMPT: Net 12
+PAD: pos=(216.955, 102.608), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(301, 169)
+  Entry Track 0: (216.730,100.390) -> (216.955,102.608), layer=F.Cu, length=2.229
+
+[22:06:16.095] ESCAPE ATTEMPT: Net 12
+PAD: pos=(214.555, 94.907), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(295, 158)
+  Escape Track 0: (214.555,94.907) -> (214.330,95.990), layer=F.Cu, length=1.106
+
+[22:06:16.099] ENTRY ATTEMPT: Net 12
+PAD: pos=(216.955, 102.608), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(301, 169)
+  Entry Track 0: (216.730,100.390) -> (216.955,102.608), layer=F.Cu, length=2.229
+
+[22:06:21.111] ESCAPE ATTEMPT: Net 12
+PAD: pos=(214.555, 94.907), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(295, 158)
+  Escape Track 0: (214.555,94.907) -> (214.330,95.990), layer=F.Cu, length=1.106
+
+[22:06:21.117] ENTRY ATTEMPT: Net 12
+PAD: pos=(216.955, 102.608), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(301, 169)
+  Entry Track 0: (216.730,100.390) -> (216.955,102.608), layer=F.Cu, length=2.229
+
+[22:06:26.129] ESCAPE ATTEMPT: Net 13
+PAD: pos=(176.645, 128.007), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(200, 235)
+  Escape Track 0: (176.645,128.007) -> (176.330,126.790), layer=F.Cu, length=1.258
+
+[22:06:26.131] ENTRY ATTEMPT: Net 13
+PAD: pos=(176.645, 116.957), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(200, 213)
+  Entry Track 0: (176.330,117.990) -> (176.645,116.957), layer=F.Cu, length=1.079
+
+[22:06:26.287] ESCAPE ATTEMPT: Net 14
+PAD: pos=(176.645, 167.757), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(200, 340)
+  Escape Track 0: (176.645,167.757) -> (176.330,168.790), layer=F.Cu, length=1.079
+
+[22:06:26.290] ENTRY ATTEMPT: Net 14
+PAD: pos=(176.645, 178.808), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(200, 362)
+  Entry Track 0: (176.330,177.590) -> (176.645,178.808), layer=F.Cu, length=1.258
+
+[22:06:26.450] ESCAPE ATTEMPT: Net 15
+PAD: pos=(176.645, 193.157), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(200, 403)
+  Escape Track 0: (176.645,193.157) -> (176.330,193.990), layer=F.Cu, length=0.890
+
+[22:06:26.454] ENTRY ATTEMPT: Net 15
+PAD: pos=(176.645, 204.208), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(200, 425)
+  Entry Track 0: (176.330,202.790) -> (176.645,204.208), layer=F.Cu, length=1.452
+
+[22:06:26.615] ESCAPE ATTEMPT: Net 16
+PAD: pos=(176.245, 128.007), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(199, 233)
+  Escape Track 0: (176.245,128.007) -> (175.930,125.990), layer=F.Cu, length=2.042
+
+[22:06:26.617] ENTRY ATTEMPT: Net 16
+PAD: pos=(175.845, 116.957), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(198, 215)
+  Entry Track 0: (175.530,118.790) -> (175.845,116.957), layer=F.Cu, length=1.859
+
+[22:06:27.416] ESCAPE ATTEMPT: Net 17
+PAD: pos=(175.845, 167.757), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(198, 342)
+  Escape Track 0: (175.845,167.757) -> (175.530,169.590), layer=F.Cu, length=1.859
+
+[22:06:27.419] ENTRY ATTEMPT: Net 17
+PAD: pos=(176.245, 178.808), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(199, 360)
+  Entry Track 0: (175.930,176.790) -> (176.245,178.808), layer=F.Cu, length=2.042
+
+[22:06:28.197] ESCAPE ATTEMPT: Net 18
+PAD: pos=(175.845, 193.157), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(198, 405)
+  Escape Track 0: (175.845,193.157) -> (175.530,194.790), layer=F.Cu, length=1.663
+
+[22:06:28.200] ENTRY ATTEMPT: Net 18
+PAD: pos=(176.245, 204.208), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(199, 423)
+  Entry Track 0: (175.930,201.990) -> (176.245,204.208), layer=F.Cu, length=2.240
+
+[22:06:28.990] ENTRY ATTEMPT: Net 19
+PAD: pos=(175.045, 116.957), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(196, 213)
+  Entry Track 0: (174.730,117.990) -> (175.045,116.957), layer=F.Cu, length=1.079
+
+[22:06:28.997] ENTRY ATTEMPT: Net 19
+PAD: pos=(175.045, 116.957), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(196, 213)
+  Entry Track 0: (174.730,117.990) -> (175.045,116.957), layer=F.Cu, length=1.079
+
+[22:06:29.003] ENTRY ATTEMPT: Net 19
+PAD: pos=(175.045, 116.957), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(196, 213)
+  Entry Track 0: (174.730,117.990) -> (175.045,116.957), layer=F.Cu, length=1.079
+
+[22:06:29.009] ENTRY ATTEMPT: Net 19
+PAD: pos=(175.045, 116.957), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(196, 213)
+  Entry Track 0: (174.730,117.990) -> (175.045,116.957), layer=F.Cu, length=1.079
+
+[22:06:29.013] ESCAPE ATTEMPT: Net 20
+PAD: pos=(175.045, 167.757), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(196, 340)
+  Escape Track 0: (175.045,167.757) -> (174.730,168.790), layer=F.Cu, length=1.079
+
+[22:06:29.019] ESCAPE ATTEMPT: Net 20
+PAD: pos=(175.045, 167.757), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(196, 340)
+  Escape Track 0: (175.045,167.757) -> (174.730,168.790), layer=F.Cu, length=1.079
+
+[22:06:29.025] ESCAPE ATTEMPT: Net 20
+PAD: pos=(175.045, 167.757), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(196, 340)
+  Escape Track 0: (175.045,167.757) -> (174.730,168.790), layer=F.Cu, length=1.079
+
+[22:06:29.032] ESCAPE ATTEMPT: Net 20
+PAD: pos=(175.045, 167.757), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(196, 340)
+  Escape Track 0: (175.045,167.757) -> (174.730,168.790), layer=F.Cu, length=1.079
+
+[22:06:29.164] ESCAPE ATTEMPT: Net 21
+PAD: pos=(175.045, 193.157), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(196, 403)
+  Escape Track 0: (175.045,193.157) -> (174.730,193.990), layer=F.Cu, length=0.890
+
+[22:06:29.170] ESCAPE ATTEMPT: Net 21
+PAD: pos=(175.045, 193.157), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(196, 403)
+  Escape Track 0: (175.045,193.157) -> (174.730,193.990), layer=F.Cu, length=0.890
+
+[22:06:29.180] ESCAPE ATTEMPT: Net 21
+PAD: pos=(175.045, 193.157), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(196, 403)
+  Escape Track 0: (175.045,193.157) -> (174.730,193.990), layer=F.Cu, length=0.890
+
+[22:06:29.186] ESCAPE ATTEMPT: Net 21
+PAD: pos=(175.045, 193.157), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(196, 403)
+  Escape Track 0: (175.045,193.157) -> (174.730,193.990), layer=F.Cu, length=0.890
+
+[22:06:29.194] ESCAPE ATTEMPT: Net 22
+PAD: pos=(175.445, 128.007), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(197, 235)
+  Escape Track 0: (175.445,128.007) -> (175.130,126.790), layer=F.Cu, length=1.258
+
+[22:06:29.198] ENTRY ATTEMPT: Net 22
+PAD: pos=(174.245, 116.957), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(194, 213)
+  Entry Track 0: (173.930,117.990) -> (174.245,116.957), layer=F.Cu, length=1.079
+
+[22:06:29.608] ESCAPE ATTEMPT: Net 23
+PAD: pos=(174.245, 167.757), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(194, 340)
+  Escape Track 0: (174.245,167.757) -> (173.930,168.790), layer=F.Cu, length=1.079
+
+[22:06:29.612] ENTRY ATTEMPT: Net 23
+PAD: pos=(175.445, 178.808), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(197, 362)
+  Entry Track 0: (175.130,177.590) -> (175.445,178.808), layer=F.Cu, length=1.258
+
+[22:06:31.395] ESCAPE ATTEMPT: Net 24
+PAD: pos=(174.245, 193.157), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(194, 403)
+  Escape Track 0: (174.245,193.157) -> (173.930,193.990), layer=F.Cu, length=0.890
+
+[22:06:31.398] ENTRY ATTEMPT: Net 24
+PAD: pos=(175.445, 204.208), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(197, 425)
+  Entry Track 0: (175.130,202.790) -> (175.445,204.208), layer=F.Cu, length=1.452
+
+[22:06:33.111] ESCAPE ATTEMPT: Net 25
+PAD: pos=(175.045, 128.007), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(196, 233)
+  Escape Track 0: (175.045,128.007) -> (174.730,125.990), layer=F.Cu, length=2.042
+
+[22:06:33.114] ENTRY ATTEMPT: Net 25
+PAD: pos=(173.445, 116.957), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(192, 213)
+  Entry Track 0: (173.130,117.990) -> (173.445,116.957), layer=F.Cu, length=1.079
+
+[22:06:34.361] ESCAPE ATTEMPT: Net 26
+PAD: pos=(173.445, 167.757), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(192, 340)
+  Escape Track 0: (173.445,167.757) -> (173.130,168.790), layer=F.Cu, length=1.079
+
+[22:06:34.363] ENTRY ATTEMPT: Net 26
+PAD: pos=(175.045, 178.808), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(196, 360)
+  Entry Track 0: (174.730,176.790) -> (175.045,178.808), layer=F.Cu, length=2.042
+
+[22:06:35.786] ESCAPE ATTEMPT: Net 27
+PAD: pos=(173.445, 193.157), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(192, 403)
+  Escape Track 0: (173.445,193.157) -> (173.130,193.990), layer=F.Cu, length=0.890
+
+[22:06:35.790] ENTRY ATTEMPT: Net 27
+PAD: pos=(175.045, 204.208), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(196, 423)
+  Entry Track 0: (174.730,201.990) -> (175.045,204.208), layer=F.Cu, length=2.240
+
+[22:06:37.161] ENTRY ATTEMPT: Net 28
+PAD: pos=(172.645, 116.957), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(190, 215)
+  Entry Track 0: (172.330,118.790) -> (172.645,116.957), layer=F.Cu, length=1.859
+
+[22:06:37.169] ENTRY ATTEMPT: Net 28
+PAD: pos=(172.645, 116.957), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(190, 215)
+  Entry Track 0: (172.330,118.790) -> (172.645,116.957), layer=F.Cu, length=1.859
+
+[22:06:37.178] ENTRY ATTEMPT: Net 28
+PAD: pos=(172.645, 116.957), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(190, 215)
+  Entry Track 0: (172.330,118.790) -> (172.645,116.957), layer=F.Cu, length=1.859
+
+[22:06:37.187] ENTRY ATTEMPT: Net 28
+PAD: pos=(172.645, 116.957), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(190, 215)
+  Entry Track 0: (172.330,118.790) -> (172.645,116.957), layer=F.Cu, length=1.859
+
+[22:06:37.191] ESCAPE ATTEMPT: Net 29
+PAD: pos=(172.645, 167.757), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(190, 342)
+  Escape Track 0: (172.645,167.757) -> (172.330,169.590), layer=F.Cu, length=1.859
+
+[22:06:37.198] ESCAPE ATTEMPT: Net 29
+PAD: pos=(172.645, 167.757), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(190, 342)
+  Escape Track 0: (172.645,167.757) -> (172.330,169.590), layer=F.Cu, length=1.859
+
+[22:06:37.204] ESCAPE ATTEMPT: Net 29
+PAD: pos=(172.645, 167.757), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(190, 342)
+  Escape Track 0: (172.645,167.757) -> (172.330,169.590), layer=F.Cu, length=1.859
+
+[22:06:37.212] ESCAPE ATTEMPT: Net 29
+PAD: pos=(172.645, 167.757), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(190, 342)
+  Escape Track 0: (172.645,167.757) -> (172.330,169.590), layer=F.Cu, length=1.859
+
+[22:06:37.217] ESCAPE ATTEMPT: Net 30
+PAD: pos=(172.645, 193.157), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(190, 405)
+  Escape Track 0: (172.645,193.157) -> (172.330,194.790), layer=F.Cu, length=1.663
+
+[22:06:37.223] ESCAPE ATTEMPT: Net 30
+PAD: pos=(172.645, 193.157), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(190, 405)
+  Escape Track 0: (172.645,193.157) -> (172.330,194.790), layer=F.Cu, length=1.663
+
+[22:06:37.234] ESCAPE ATTEMPT: Net 30
+PAD: pos=(172.645, 193.157), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(190, 405)
+  Escape Track 0: (172.645,193.157) -> (172.330,194.790), layer=F.Cu, length=1.663
+
+[22:06:37.239] ESCAPE ATTEMPT: Net 30
+PAD: pos=(172.645, 193.157), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(190, 405)
+  Escape Track 0: (172.645,193.157) -> (172.330,194.790), layer=F.Cu, length=1.663
+
+[22:06:37.376] ESCAPE ATTEMPT: Net 31
+PAD: pos=(174.245, 128.007), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(194, 235)
+  Escape Track 0: (174.245,128.007) -> (173.930,126.790), layer=F.Cu, length=1.258
+
+[22:06:37.378] ENTRY ATTEMPT: Net 31
+PAD: pos=(171.845, 116.957), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(188, 213)
+  Entry Track 0: (171.530,117.990) -> (171.845,116.957), layer=F.Cu, length=1.079
+
+[22:06:37.612] ESCAPE ATTEMPT: Net 32
+PAD: pos=(171.845, 167.757), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(188, 340)
+  Escape Track 0: (171.845,167.757) -> (171.530,168.790), layer=F.Cu, length=1.079
+
+[22:06:37.615] ENTRY ATTEMPT: Net 32
+PAD: pos=(174.245, 178.808), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(194, 362)
+  Entry Track 0: (173.930,177.590) -> (174.245,178.808), layer=F.Cu, length=1.258
+
+[22:06:42.628] ESCAPE ATTEMPT: Net 32
+PAD: pos=(171.845, 167.757), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(188, 340)
+  Escape Track 0: (171.845,167.757) -> (171.530,168.790), layer=F.Cu, length=1.079
+
+[22:06:42.634] ENTRY ATTEMPT: Net 32
+PAD: pos=(174.245, 178.808), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(194, 362)
+  Entry Track 0: (173.930,177.590) -> (174.245,178.808), layer=F.Cu, length=1.258
+
+[22:06:47.649] ESCAPE ATTEMPT: Net 32
+PAD: pos=(171.845, 167.757), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(188, 340)
+  Escape Track 0: (171.845,167.757) -> (171.530,168.790), layer=F.Cu, length=1.079
+
+[22:06:47.655] ENTRY ATTEMPT: Net 32
+PAD: pos=(174.245, 178.808), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(194, 362)
+  Entry Track 0: (173.930,177.590) -> (174.245,178.808), layer=F.Cu, length=1.258
+
+[22:06:52.668] ESCAPE ATTEMPT: Net 32
+PAD: pos=(171.845, 167.757), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(188, 340)
+  Escape Track 0: (171.845,167.757) -> (171.530,168.790), layer=F.Cu, length=1.079
+
+[22:06:52.673] ENTRY ATTEMPT: Net 32
+PAD: pos=(174.245, 178.808), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(194, 362)
+  Entry Track 0: (173.930,177.590) -> (174.245,178.808), layer=F.Cu, length=1.258
+
+[22:06:57.682] ESCAPE ATTEMPT: Net 33
+PAD: pos=(171.845, 193.157), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(188, 403)
+  Escape Track 0: (171.845,193.157) -> (171.530,193.990), layer=F.Cu, length=0.890
+
+[22:06:57.687] ENTRY ATTEMPT: Net 33
+PAD: pos=(174.245, 204.208), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(194, 425)
+  Entry Track 0: (173.930,202.790) -> (174.245,204.208), layer=F.Cu, length=1.452
+
+[22:07:02.702] ESCAPE ATTEMPT: Net 33
+PAD: pos=(171.845, 193.157), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(188, 403)
+  Escape Track 0: (171.845,193.157) -> (171.530,193.990), layer=F.Cu, length=0.890
+
+[22:07:02.707] ENTRY ATTEMPT: Net 33
+PAD: pos=(174.245, 204.208), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(194, 425)
+  Entry Track 0: (173.930,202.790) -> (174.245,204.208), layer=F.Cu, length=1.452
+
+[22:07:07.722] ESCAPE ATTEMPT: Net 33
+PAD: pos=(171.845, 193.157), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(188, 403)
+  Escape Track 0: (171.845,193.157) -> (171.530,193.990), layer=F.Cu, length=0.890
+
+[22:07:07.728] ENTRY ATTEMPT: Net 33
+PAD: pos=(174.245, 204.208), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(194, 425)
+  Entry Track 0: (173.930,202.790) -> (174.245,204.208), layer=F.Cu, length=1.452
+
+[22:07:12.739] ESCAPE ATTEMPT: Net 33
+PAD: pos=(171.845, 193.157), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(188, 403)
+  Escape Track 0: (171.845,193.157) -> (171.530,193.990), layer=F.Cu, length=0.890
+
+[22:07:12.743] ENTRY ATTEMPT: Net 33
+PAD: pos=(174.245, 204.208), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(194, 425)
+  Entry Track 0: (173.930,202.790) -> (174.245,204.208), layer=F.Cu, length=1.452
+
+[22:07:17.757] ESCAPE ATTEMPT: Net 34
+PAD: pos=(173.845, 128.007), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(193, 233)
+  Escape Track 0: (173.845,128.007) -> (173.530,125.990), layer=F.Cu, length=2.042
+
+[22:07:17.764] ENTRY ATTEMPT: Net 34
+PAD: pos=(171.045, 116.957), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(186, 213)
+  Entry Track 0: (170.730,117.990) -> (171.045,116.957), layer=F.Cu, length=1.079
+
+[22:07:19.091] ESCAPE ATTEMPT: Net 35
+PAD: pos=(171.045, 167.757), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(186, 340)
+  Escape Track 0: (171.045,167.757) -> (170.730,168.790), layer=F.Cu, length=1.079
+
+[22:07:19.095] ENTRY ATTEMPT: Net 35
+PAD: pos=(173.845, 178.808), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(193, 362)
+  Entry Track 0: (173.530,177.590) -> (173.845,178.808), layer=F.Cu, length=1.258
+
+[22:07:24.108] ESCAPE ATTEMPT: Net 35
+PAD: pos=(171.045, 167.757), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(186, 340)
+  Escape Track 0: (171.045,167.757) -> (170.730,168.790), layer=F.Cu, length=1.079
+
+[22:07:24.111] ENTRY ATTEMPT: Net 35
+PAD: pos=(173.845, 178.808), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(193, 362)
+  Entry Track 0: (173.530,177.590) -> (173.845,178.808), layer=F.Cu, length=1.258
+
+[22:07:29.123] ESCAPE ATTEMPT: Net 35
+PAD: pos=(171.045, 167.757), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(186, 340)
+  Escape Track 0: (171.045,167.757) -> (170.730,168.790), layer=F.Cu, length=1.079
+
+[22:07:29.127] ENTRY ATTEMPT: Net 35
+PAD: pos=(173.845, 178.808), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(193, 362)
+  Entry Track 0: (173.530,177.590) -> (173.845,178.808), layer=F.Cu, length=1.258
+
+[22:07:34.137] ESCAPE ATTEMPT: Net 35
+PAD: pos=(171.045, 167.757), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(186, 340)
+  Escape Track 0: (171.045,167.757) -> (170.730,168.790), layer=F.Cu, length=1.079
+
+[22:07:34.141] ENTRY ATTEMPT: Net 35
+PAD: pos=(173.845, 178.808), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(193, 362)
+  Entry Track 0: (173.530,177.590) -> (173.845,178.808), layer=F.Cu, length=1.258
+
+[22:07:39.156] ESCAPE ATTEMPT: Net 36
+PAD: pos=(171.045, 193.157), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(186, 403)
+  Escape Track 0: (171.045,193.157) -> (170.730,193.990), layer=F.Cu, length=0.890
+
+[22:07:39.162] ENTRY ATTEMPT: Net 36
+PAD: pos=(173.845, 204.208), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(193, 425)
+  Entry Track 0: (173.530,202.790) -> (173.845,204.208), layer=F.Cu, length=1.452
+
+[22:07:44.176] ESCAPE ATTEMPT: Net 36
+PAD: pos=(171.045, 193.157), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(186, 403)
+  Escape Track 0: (171.045,193.157) -> (170.730,193.990), layer=F.Cu, length=0.890
+
+[22:07:44.180] ENTRY ATTEMPT: Net 36
+PAD: pos=(173.845, 204.208), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(193, 425)
+  Entry Track 0: (173.530,202.790) -> (173.845,204.208), layer=F.Cu, length=1.452
+
+[22:07:49.193] ESCAPE ATTEMPT: Net 36
+PAD: pos=(171.045, 193.157), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(186, 403)
+  Escape Track 0: (171.045,193.157) -> (170.730,193.990), layer=F.Cu, length=0.890
+
+[22:07:49.197] ENTRY ATTEMPT: Net 36
+PAD: pos=(173.845, 204.208), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(193, 425)
+  Entry Track 0: (173.530,202.790) -> (173.845,204.208), layer=F.Cu, length=1.452
+
+[22:07:54.210] ESCAPE ATTEMPT: Net 36
+PAD: pos=(171.045, 193.157), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(186, 403)
+  Escape Track 0: (171.045,193.157) -> (170.730,193.990), layer=F.Cu, length=0.890
+
+[22:07:54.216] ENTRY ATTEMPT: Net 36
+PAD: pos=(173.845, 204.208), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(193, 425)
+  Entry Track 0: (173.530,202.790) -> (173.845,204.208), layer=F.Cu, length=1.452
+
+[22:07:59.228] ESCAPE ATTEMPT: Net 37
+PAD: pos=(216.555, 153.407), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(300, 298)
+  Escape Track 0: (216.555,153.407) -> (216.330,151.990), layer=F.Cu, length=1.435
+
+[22:07:59.232] ENTRY ATTEMPT: Net 37
+PAD: pos=(208.055, 145.708), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(279, 285)
+  Entry Track 0: (207.930,146.790) -> (208.055,145.708), layer=F.Cu, length=1.090
+
+[22:08:02.020] ESCAPE ATTEMPT: Net 38
+PAD: pos=(216.555, 77.207), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(300, 108)
+  Escape Track 0: (216.555,77.207) -> (216.330,75.990), layer=F.Cu, length=1.238
+
+[22:08:02.023] ENTRY ATTEMPT: Net 38
+PAD: pos=(208.055, 69.507), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(279, 94)
+  Entry Track 0: (207.930,70.390) -> (208.055,69.507), layer=F.Cu, length=0.891
+
+[22:08:04.793] ESCAPE ATTEMPT: Net 39
+PAD: pos=(208.055, 94.907), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(279, 158)
+  Escape Track 0: (208.055,94.907) -> (207.930,95.990), layer=F.Cu, length=1.090
+
+[22:08:04.800] ENTRY ATTEMPT: Net 39
+PAD: pos=(216.555, 102.608), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(300, 171)
+  Entry Track 0: (216.330,101.190) -> (216.555,102.608), layer=F.Cu, length=1.435
+
+[22:08:09.810] ESCAPE ATTEMPT: Net 39
+PAD: pos=(208.055, 94.907), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(279, 158)
+  Escape Track 0: (208.055,94.907) -> (207.930,95.990), layer=F.Cu, length=1.090
+
+[22:08:09.815] ENTRY ATTEMPT: Net 39
+PAD: pos=(216.555, 102.608), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(300, 171)
+  Entry Track 0: (216.330,101.190) -> (216.555,102.608), layer=F.Cu, length=1.435
+
+[22:08:14.827] ESCAPE ATTEMPT: Net 39
+PAD: pos=(208.055, 94.907), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(279, 158)
+  Escape Track 0: (208.055,94.907) -> (207.930,95.990), layer=F.Cu, length=1.090
+
+[22:08:14.833] ENTRY ATTEMPT: Net 39
+PAD: pos=(216.555, 102.608), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(300, 171)
+  Entry Track 0: (216.330,101.190) -> (216.555,102.608), layer=F.Cu, length=1.435
+
+[22:08:19.847] ESCAPE ATTEMPT: Net 39
+PAD: pos=(208.055, 94.907), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(279, 158)
+  Escape Track 0: (208.055,94.907) -> (207.930,95.990), layer=F.Cu, length=1.090
+
+[22:08:19.852] ENTRY ATTEMPT: Net 39
+PAD: pos=(216.555, 102.608), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(300, 171)
+  Entry Track 0: (216.330,101.190) -> (216.555,102.608), layer=F.Cu, length=1.435
+
+[22:08:24.863] ESCAPE ATTEMPT: Net 40
+PAD: pos=(173.445, 128.007), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(192, 235)
+  Escape Track 0: (173.445,128.007) -> (173.130,126.790), layer=F.Cu, length=1.258
+
+[22:08:24.868] ENTRY ATTEMPT: Net 40
+PAD: pos=(170.245, 116.957), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(184, 213)
+  Entry Track 0: (169.930,117.990) -> (170.245,116.957), layer=F.Cu, length=1.079
+
+[22:08:25.699] ESCAPE ATTEMPT: Net 41
+PAD: pos=(170.245, 167.757), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(184, 340)
+  Escape Track 0: (170.245,167.757) -> (169.930,168.790), layer=F.Cu, length=1.079
+
+[22:08:25.706] ENTRY ATTEMPT: Net 41
+PAD: pos=(173.445, 178.808), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(192, 362)
+  Entry Track 0: (173.130,177.590) -> (173.445,178.808), layer=F.Cu, length=1.258
+
+[22:08:30.716] ESCAPE ATTEMPT: Net 41
+PAD: pos=(170.245, 167.757), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(184, 340)
+  Escape Track 0: (170.245,167.757) -> (169.930,168.790), layer=F.Cu, length=1.079
+
+[22:08:30.722] ENTRY ATTEMPT: Net 41
+PAD: pos=(173.445, 178.808), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(192, 362)
+  Entry Track 0: (173.130,177.590) -> (173.445,178.808), layer=F.Cu, length=1.258
+
+[22:08:35.735] ESCAPE ATTEMPT: Net 41
+PAD: pos=(170.245, 167.757), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(184, 340)
+  Escape Track 0: (170.245,167.757) -> (169.930,168.790), layer=F.Cu, length=1.079
+
+[22:08:35.741] ENTRY ATTEMPT: Net 41
+PAD: pos=(173.445, 178.808), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(192, 362)
+  Entry Track 0: (173.130,177.590) -> (173.445,178.808), layer=F.Cu, length=1.258
+
+[22:08:40.752] ESCAPE ATTEMPT: Net 41
+PAD: pos=(170.245, 167.757), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(184, 340)
+  Escape Track 0: (170.245,167.757) -> (169.930,168.790), layer=F.Cu, length=1.079
+
+[22:08:40.757] ENTRY ATTEMPT: Net 41
+PAD: pos=(173.445, 178.808), layers=['F.Cu']
+RESULT: Success - 1 tracks, grid_entry=(192, 362)
+  Entry Track 0: (173.130,177.590) -> (173.445,178.808), layer=F.Cu, length=1.258
+
