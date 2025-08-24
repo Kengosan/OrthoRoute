@@ -20,7 +20,11 @@
       "Bash(timeout 20 python main.py plugin)",
       "Bash(timeout 10 python:*)",
       "Bash(timeout 25 python main.py plugin)",
-      "Bash(rg:*)"
+      "Bash(rg:*)",
+      "Bash(timeout 60 python main.py plugin)",
+      "Bash(timeout 30 python main.py plugin)",
+      "Bash(timeout 120 python main.py plugin)",
+      "Bash(pip install:*)"
     ],
     "deny": [],
     "ask": [],

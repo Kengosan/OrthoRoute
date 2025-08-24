@@ -38,6 +38,8 @@ from PyQt6.QtGui import (
 
 from .kicad_colors import KiCadColorScheme
 from ...algorithms.manhattan.deterministic_router import DeterministicManhattanRouter, RoutingConfig
+from ...algorithms.manhattan.spec_manhattan_router import SpecManhattanRouter
+from ...algorithms.manhattan.manhattan_router_rrg import ManhattanRRGRoutingEngine
 from ...infrastructure.gpu.cuda_provider import CUDAProvider
 from ...infrastructure.gpu.cpu_fallback import CPUProvider
 
@@ -66,7 +68,7 @@ class RoutingThread(QThread):
         """Run the routing operation in a background thread."""
         try:
             # Initialize the appropriate router based on algorithm
-            if self.algorithm == "Manhattan":
+            if self.algorithm == "Manhattan RRG":
                 # Get DRC constraints from board data or create defaults
                 drc_constraints = None
                 if hasattr(self.board_data, 'drc_constraints') and self.board_data.drc_constraints:
@@ -86,26 +88,49 @@ class RoutingThread(QThread):
                     except ImportError:
                         logger.warning("Could not create DRC constraints")
                 
-                # Use deterministic manhattan router with config, GPU provider, and DRC constraints
-                self.router = DeterministicManhattanRouter(
-                    config=self.config, 
-                    gpu_provider=self.gpu_provider,
-                    drc_constraints=drc_constraints
+                # Use new RRG-based Manhattan router
+                logger.info("🚀 Initializing RRG-based Manhattan router")
+                
+                # Create mock board object for RRG router
+                from ...domain.models.board import Board
+                from ...domain.models.constraints import DRCConstraints
+                
+                # Convert board_data dict to domain Board object
+                mock_board = self._convert_board_data_to_domain(self.board_data, drc_constraints)
+                
+                # Create RRG router
+                self.router = ManhattanRRGRoutingEngine(
+                    constraints=drc_constraints or DRCConstraints(),
+                    gpu_provider=self.gpu_provider
                 )
                 
-                # Setup callback function to send progress updates
-                def progress_callback(current, total, status, tracks=None, vias=None):
-                    if self.is_cancelled:
-                        return False  # Signal to stop routing
-                    self.progress_update.emit(current, total, status, tracks or [], vias or [])
-                    QApplication.processEvents()  # Process UI events
-                    return True  # Continue routing
+                # Initialize the router with board data
+                self.router.initialize(mock_board)
                 
-                # Run the routing operation
-                result = self.router.route_board(
-                    self.board_data,
-                    progress_callback=progress_callback
+                # Route all nets using RRG PathFinder
+                logger.info(f"🎯 Routing {len(mock_board.nets)} nets with RRG PathFinder")
+                
+                # Use RRG router interface
+                routing_stats = self.router.route_all_nets(
+                    nets=mock_board.nets,
+                    timeout_per_net=5.0,
+                    total_timeout=300.0
                 )
+                
+                # Convert routing statistics to result format
+                result = {
+                    'success': routing_stats.nets_routed > 0,
+                    'tracks': self.router.get_routed_tracks(),
+                    'vias': self.router.get_routed_vias(),
+                    'routed_nets': routing_stats.nets_routed,
+                    'failed_nets': routing_stats.nets_failed,
+                    'stats': {
+                        'elapsed_time': routing_stats.total_time,
+                        'total_length': routing_stats.total_length,
+                        'total_vias': routing_stats.total_vias,
+                        'success_rate': routing_stats.success_rate
+                    }
+                }
                 
                 if self.is_cancelled:
                     return
@@ -123,6 +148,96 @@ class RoutingThread(QThread):
     def cancel(self):
         """Cancel the routing operation."""
         self.is_cancelled = True
+    
+    def _convert_board_data_to_domain(self, board_data, drc_constraints):
+        """Convert board_data dict to domain Board object for RRG router"""
+        from ...domain.models.board import Board, Net, Pad, Bounds, Coordinate, Component
+        
+        # Create board bounds
+        bounds_data = board_data.get('bounds', (0, 0, 100, 100))
+        board_bounds = Bounds(
+            min_x=bounds_data[0],
+            min_y=bounds_data[1], 
+            max_x=bounds_data[2],
+            max_y=bounds_data[3]
+        )
+        
+        # Convert nets and pads
+        nets = []
+        nets_data = board_data.get('nets', {})
+        
+        for net_name, net_data in nets_data.items():
+            if not net_name or net_name.strip() == "":
+                continue
+                
+            pads_data = net_data.get('pads', [])
+            if len(pads_data) < 2:
+                continue  # Skip single-pad nets
+            
+            # Convert pads
+            net_pads = []
+            for pad_data in pads_data:
+                pad = Pad(
+                    id=f"{net_name}_pad_{len(net_pads)}",
+                    component_id=f"comp_{net_name}_{len(net_pads)}",
+                    net_id=f"net_{len(nets)}",
+                    position=Coordinate(
+                        x=pad_data.get('x', 0.0),
+                        y=pad_data.get('y', 0.0)
+                    ),
+                    size=(
+                        pad_data.get('width', 1.0),
+                        pad_data.get('height', 1.0)
+                    ),
+                    drill_size=pad_data.get('drill', None),
+                    layer=pad_data.get('layers', ['F.Cu'])[0] if pad_data.get('layers') else 'F.Cu'
+                )
+                net_pads.append(pad)
+            
+            # Create net
+            net = Net(
+                id=f"net_{len(nets)}",
+                name=net_name,
+                pads=net_pads
+            )
+            nets.append(net)
+        
+        # Create mock components for proper bounds calculation
+        components = []
+        all_pads = []
+        for net in nets:
+            for i, pad in enumerate(net.pads):
+                all_pads.append(pad)
+        
+        # Create a single mock component containing all pads
+        if all_pads:
+            # Calculate center position
+            avg_x = sum(pad.position.x for pad in all_pads) / len(all_pads)
+            avg_y = sum(pad.position.y for pad in all_pads) / len(all_pads)
+            
+            mock_component = Component(
+                id="mock_comp_1",
+                reference="U1",
+                value="MOCK",
+                footprint="MOCK_FP",
+                position=Coordinate(avg_x, avg_y),
+                pads=all_pads
+            )
+            components.append(mock_component)
+        
+        # Create board
+        board = Board(
+            id="board_1",
+            name=board_data.get('filename', 'unknown.kicad_pcb'),
+            components=components,
+            nets=nets,
+            layer_count=12  # F.Cu + 10 internal + B.Cu
+        )
+        
+        # Store airwires as a custom attribute for RRG routing
+        board._airwires = board_data.get('airwires', [])
+        
+        return board
 
 
 class PCBViewer(QWidget):
@@ -587,6 +702,37 @@ class PCBViewer(QWidget):
         if event.button() == Qt.MouseButton.LeftButton:
             self.is_panning = False
             self.setCursor(Qt.CursorShape.ArrowCursor)
+    
+    def debug_screenshot(self, filename_prefix: str = "debug_routing"):
+        """Capture screenshot of the PCB viewer for debugging"""
+        try:
+            import os
+            from datetime import datetime
+            
+            # Create debug output directory
+            debug_dir = "debug_output"
+            os.makedirs(debug_dir, exist_ok=True)
+            
+            # Generate filename with timestamp
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]  # milliseconds
+            filename = f"{debug_dir}/{filename_prefix}_{timestamp}.png"
+            
+            # Capture the widget as a pixmap
+            pixmap = self.grab()
+            
+            # Save the screenshot
+            success = pixmap.save(filename, "PNG")
+            
+            if success:
+                print(f"DEBUG: Screenshot saved to {filename}")
+                return filename
+            else:
+                print(f"DEBUG: Failed to save screenshot to {filename}")
+                return None
+                
+        except Exception as e:
+            print(f"DEBUG: Screenshot error: {e}")
+            return None
             
 
 class OrthoRouteMainWindow(QMainWindow):
@@ -707,7 +853,7 @@ class OrthoRouteMainWindow(QMainWindow):
         # Available algorithms
         algorithm_options = [
             "Wavefront",
-            "Manhattan"
+            "Manhattan RRG"
         ]
         
         self.algorithm_combo.addItems(algorithm_options)
@@ -1021,14 +1167,18 @@ class OrthoRouteMainWindow(QMainWindow):
         algorithm_text = self.algorithm_combo.currentText()
         logger.info(f"🚀 Begin autorouting with {algorithm_text}")
         
+        # DEBUG: Screenshot before routing starts
+        if self.pcb_viewer:
+            self.pcb_viewer.debug_screenshot("before_routing")
+        
         self.status_label.setText("Starting autorouting...")
         self.route_preview_btn.setEnabled(False)
         self.progress_bar.setVisible(True)
         self.progress_bar.setValue(0)
         
         # Route based on selected algorithm
-        if algorithm_text == "Manhattan":
-            self._route_manhattan()
+        if algorithm_text == "Manhattan RRG":
+            self._route_manhattan_rrg()
         elif algorithm_text == "Wavefront":
             QMessageBox.information(self, "Routing", "Wavefront routing not yet implemented")
             self._reset_routing_ui()
@@ -1097,14 +1247,14 @@ class OrthoRouteMainWindow(QMainWindow):
         """Auto route all nets (menu action)"""
         self.begin_autorouting()
     
-    def _route_manhattan(self):
-        """Perform Manhattan routing in a background thread"""
+    def _route_manhattan_rrg(self):
+        """Perform Manhattan RRG routing in a background thread"""
         try:
             logger.info("Starting Manhattan routing...")
             
-            # Create routing configuration
+            # Create AGGRESSIVE routing configuration for 2 nets/second target
             config = RoutingConfig(
-                grid_pitch=0.40,  # 0.40mm grid
+                grid_pitch=0.40,  # 0.40mm grid - EXACT GRID ALIGNMENT
                 track_width=0.0889,  # 3.5 mil
                 clearance=0.2,  # KiCad default
                 via_drill=0.4,  # Typical drill for 0.8mm via
@@ -1112,9 +1262,9 @@ class OrthoRouteMainWindow(QMainWindow):
                 bend_penalty=2,
                 via_cost=10,
                 expansion_margin=3.0,
-                max_ripups_per_net=3,
+                max_ripups_per_net=2,  # AGGRESSIVE: Reduced from 3
                 max_global_failures=100,
-                timeout_per_net=5.0
+                timeout_per_net=0.1  # AGGRESSIVE: 0.1s for 2 nets/second target
             )
             
             # Create GPU provider for router
@@ -1134,7 +1284,7 @@ class OrthoRouteMainWindow(QMainWindow):
                 logger.info("Using CPU fallback for Manhattan routing")
             
             # Create and configure the routing thread
-            self.routing_thread = RoutingThread("Manhattan", self.board_data, config, gpu_provider)
+            self.routing_thread = RoutingThread("Manhattan RRG", self.board_data, config, gpu_provider)
             
             # Connect thread signals
             self.routing_thread.progress_update.connect(self._on_routing_progress)
@@ -1206,6 +1356,10 @@ class OrthoRouteMainWindow(QMainWindow):
         
         # Store routing result for commit
         self.routing_result = result
+        
+        # DEBUG: Screenshot after routing completes
+        if self.pcb_viewer:
+            self.pcb_viewer.debug_screenshot("after_routing")
         
         # Update status
         routed_nets = result.get('routed_nets', 0)

@@ -89,12 +89,69 @@ class RoutingConfig:
     expansion_margin: float = 3.0  # mm
     max_ripups_per_net: int = 2  # Reduced from 3 to 2
     max_global_failures: int = 100
-    timeout_per_net: float = 1.0  # Reduced from 5.0 to 1.0 seconds
+    timeout_per_net: float = 0.1  # AGGRESSIVE: 0.1 seconds for 2 nets/second target
     
     @property
     def via_size(self) -> float:
         """Alias for via_diameter for compatibility"""
         return self.via_diameter
+
+@dataclass 
+class FabricSegment:
+    """A segment of routing fabric - straight trace between two nodes"""
+    segment_id: str
+    layer_name: str 
+    start_x: float
+    start_y: float
+    end_x: float
+    end_y: float
+    is_horizontal: bool
+    status: str = "AVAILABLE"  # AVAILABLE | CLAIMED | RESERVED
+    claimed_by_net: Optional[str] = None
+    
+    @property
+    def length(self) -> float:
+        return ((self.end_x - self.start_x)**2 + (self.end_y - self.start_y)**2)**0.5
+
+@dataclass
+class FabricNode:
+    """Intersection point where fabric segments meet - via location"""
+    node_id: str
+    x: float
+    y: float
+    layers: List[str]  # Which layers this node connects
+    connected_segments: List[str]  # Segment IDs connected to this node
+    
+@dataclass
+class FabricNetwork:
+    """Complete routing fabric for internal layers"""
+    segments: Dict[str, FabricSegment]  # segment_id -> FabricSegment
+    nodes: Dict[str, FabricNode]  # node_id -> FabricNode
+    layer_segments: Dict[str, List[str]]  # layer_name -> [segment_ids]
+    
+    def get_available_segments(self, layer_name: str) -> List[FabricSegment]:
+        """Get all available segments on a layer"""
+        layer_seg_ids = self.layer_segments.get(layer_name, [])
+        return [self.segments[seg_id] for seg_id in layer_seg_ids 
+                if self.segments[seg_id].status == "AVAILABLE"]
+    
+    def claim_segment(self, segment_id: str, net_name: str) -> bool:
+        """Claim a segment for a net"""
+        if segment_id in self.segments and self.segments[segment_id].status == "AVAILABLE":
+            self.segments[segment_id].status = "CLAIMED"
+            self.segments[segment_id].claimed_by_net = net_name
+            return True
+        return False
+    
+    def release_segments(self, net_name: str) -> int:
+        """Release all segments claimed by a net"""
+        released = 0
+        for segment in self.segments.values():
+            if segment.claimed_by_net == net_name:
+                segment.status = "AVAILABLE"
+                segment.claimed_by_net = None
+                released += 1
+        return released
 
 def get_pos_mm(pad_data: Dict) -> Tuple[float, float]:
     """Extract position in mm from pad data (already converted by KiCad interface)"""
@@ -251,6 +308,9 @@ class DeterministicManhattanRouter:
         self.failed_count = 0
         self.ripup_stats = {}
         
+        # Fabric-first routing system
+        self.fabric_network: Optional[FabricNetwork] = None
+        
     def route_board(self, board_data: Dict[str, Any], progress_callback=None) -> RouteResult:
         """
         Main routing entry point
@@ -265,6 +325,9 @@ class DeterministicManhattanRouter:
             
             # Initialize routing grid using snapshot
             self._initialize_grid(board_data)
+            
+            # Generate fabric network for internal layers
+            self.fabric_network = self._generate_fabric_network()
             
             # Prepare nets for routing (now using snapshot)
             nets = self._prepare_nets_from_snapshot()
@@ -321,6 +384,9 @@ class DeterministicManhattanRouter:
             logger.info(f"🏁 Routing completed in {elapsed_time:.2f}s")
             logger.info(f"📊 Results: {self.routed_count} routed, {self.failed_count} failed")
             
+            # Clean up fabric network and convert claimed segments to tracks
+            fabric_cleanup_stats = self._cleanup_fabric_network()
+            
             return RouteResult(
                 success=self.failed_count == 0,
                 tracks=self.tracks,
@@ -331,7 +397,8 @@ class DeterministicManhattanRouter:
                     'elapsed_time': elapsed_time,
                     'total_nets': len(nets),
                     'grid_size': (self.grid_width, self.grid_height, self.num_layers),
-                    'ripup_stats': self.ripup_stats
+                    'ripup_stats': self.ripup_stats,
+                    'fabric_cleanup': fabric_cleanup_stats
                 }
             )
             
@@ -397,10 +464,10 @@ class DeterministicManhattanRouter:
             self.reverse_layer_mapping[idx] = layer_name
         
         # Set layer directions using proper name-based mapping
-        # Spec: F.Cu = H (horizontal), odd internals = H, even internals + B.Cu = V
+        # Spec: F.Cu = V (vertical), odd internals = H, even internals + B.Cu = V
         def is_horizontal(layer_name: str) -> bool:
             if layer_name == "F.Cu":
-                return True   # F.Cu is horizontal for escape routing
+                return False  # F.Cu is vertical for proper DRC compliance
             if layer_name == "B.Cu":
                 return False  # B.Cu is vertical
             if layer_name.startswith("In"):
@@ -895,7 +962,140 @@ class DeterministicManhattanRouter:
         }
     
     def _route_fcu_to_fcu(self, start_pad: Dict, end_pad: Dict, net_id: int) -> Optional[Dict]:
-        """Route between two F.Cu pads using escape routing and blind vias"""
+        """FABRIC-FIRST: Route between F.Cu pads via fabric network"""
+        logger.info("🏗️ FABRIC-FIRST: Routing F.Cu to F.Cu via fabric network")
+        
+        if not self.fabric_network:
+            logger.error("No fabric network available - falling back to old routing")
+            return self._route_fcu_to_fcu_legacy(start_pad, end_pad, net_id)
+        
+        # Get pad positions
+        start_x, start_y = get_pos_mm(start_pad)
+        end_x, end_y = get_pos_mm(end_pad)
+        net_name = f"net_{net_id}"
+        
+        # Find nearest fabric nodes for F.Cu escapes
+        start_node_id = self._find_nearest_fabric_node(start_x, start_y)
+        end_node_id = self._find_nearest_fabric_node(end_x, end_y)
+        
+        if not start_node_id or not end_node_id:
+            logger.error("Could not find fabric nodes for pads")
+            return None
+        
+        start_node = self.fabric_network.nodes[start_node_id]
+        end_node = self.fabric_network.nodes[end_node_id]
+        
+        logger.info(f"Start pad ({start_x:.3f}, {start_y:.3f}) -> fabric node {start_node_id} ({start_node.x:.3f}, {start_node.y:.3f})")
+        logger.info(f"End pad ({end_x:.3f}, {end_y:.3f}) -> fabric node {end_node_id} ({end_node.x:.3f}, {end_node.y:.3f})")
+        
+        # Find path through fabric
+        fabric_segment_path = self._find_fabric_path(start_node_id, end_node_id, net_name)
+        
+        if not fabric_segment_path:
+            logger.info("No fabric path found between nodes")
+            return None
+        
+        logger.info(f"Found fabric path with {len(fabric_segment_path)} segments")
+        
+        # Claim fabric segments for this net
+        claimed_segments = []
+        for seg_id in fabric_segment_path:
+            if self.fabric_network.claim_segment(seg_id, net_name):
+                claimed_segments.append(seg_id)
+                logger.debug(f"Claimed segment {seg_id} for {net_name}")
+            else:
+                logger.warning(f"Could not claim segment {seg_id} - may already be claimed")
+        
+        # Generate route structure
+        tracks = []
+        vias = []
+        path_points = []
+        
+        # 1. F.Cu escape from start pad to fabric
+        escape_track = {
+            'start_x': start_x,
+            'start_y': start_y,
+            'end_x': start_node.x,
+            'end_y': start_node.y,
+            'layer': 'F.Cu',
+            'width': self.config.track_width,
+            'net_id': net_id
+        }
+        tracks.append(escape_track)
+        path_points.append((start_x, start_y))
+        path_points.append((start_node.x, start_node.y))
+        
+        # 2. Blind via F.Cu -> In1.Cu at start
+        start_via = {
+            'x': start_node.x,
+            'y': start_node.y,
+            'drill': self.config.via_drill,
+            'diameter': self.config.via_diameter,
+            'from_layer': 'F.Cu',
+            'to_layer': 'In1.Cu',  # First internal layer
+            'net_id': net_id,
+            'via_type': 'blind'
+        }
+        vias.append(start_via)
+        
+        # 3. Convert fabric segments to tracks
+        current_x, current_y = start_node.x, start_node.y
+        
+        for seg_id in fabric_segment_path:
+            segment = self.fabric_network.segments[seg_id]
+            
+            # Create track for this fabric segment
+            fabric_track = {
+                'start_x': segment.start_x,
+                'start_y': segment.start_y,
+                'end_x': segment.end_x,
+                'end_y': segment.end_y,
+                'layer': segment.layer_name,
+                'width': self.config.track_width,
+                'net_id': net_id
+            }
+            tracks.append(fabric_track)
+            path_points.extend([(segment.start_x, segment.start_y), (segment.end_x, segment.end_y)])
+            
+            current_x, current_y = segment.end_x, segment.end_y
+        
+        # 4. Entry from fabric to end pad  
+        entry_track = {
+            'start_x': end_node.x,
+            'start_y': end_node.y,
+            'end_x': end_x,
+            'end_y': end_y,
+            'layer': 'F.Cu',
+            'width': self.config.track_width,
+            'net_id': net_id
+        }
+        tracks.append(entry_track)
+        path_points.append((end_x, end_y))
+        
+        # 5. Blind via In1.Cu -> F.Cu at end
+        end_via = {
+            'x': end_node.x,
+            'y': end_node.y,
+            'drill': self.config.via_drill,
+            'diameter': self.config.via_diameter,
+            'from_layer': 'In1.Cu',
+            'to_layer': 'F.Cu',
+            'net_id': net_id,
+            'via_type': 'blind'
+        }
+        vias.append(end_via)
+        
+        route_length = sum(((t['end_x']-t['start_x'])**2 + (t['end_y']-t['start_y'])**2)**0.5 for t in tracks)
+        
+        return {
+            'cost': route_length + len(vias) * self.config.via_cost,
+            'tracks': tracks,
+            'vias': vias,
+            'path_points': path_points
+        }
+
+    def _route_fcu_to_fcu_legacy(self, start_pad: Dict, end_pad: Dict, net_id: int) -> Optional[Dict]:
+        """Legacy F.Cu routing (fallback only)"""
         # Find F.Cu layer index 
         fcu_idx = self.layer_mapping.get('F.Cu', 0)
         
@@ -961,13 +1161,21 @@ class DeterministicManhattanRouter:
         gx, gy = self.world_to_grid(pad_x, pad_y)
         fcu_idx = self.layer_mapping.get('F.Cu', 0)
         
-        # Find escape direction on F.Cu (horizontal preferred since F.Cu is horizontal)
+        # Find escape direction on F.Cu (vertical preferred since F.Cu is typically vertical)
         escape_points = []
+        
+        # Get F.Cu layer direction
+        fcu_direction = self.layer_directions.get(fcu_idx, 'V')  # Default to vertical
         
         # Try taxicab ring order for escape points
         for step in range(1, 6):  # Try distances 1-5 grid cells
-            # Horizontal escapes first (F.Cu preferred direction)
-            for dx, dy in [(step, 0), (-step, 0), (0, step), (0, -step)]:
+            # Prioritize escapes in the layer's preferred direction
+            if fcu_direction == 'V':  # Vertical preferred - try vertical escapes first
+                direction_order = [(0, step), (0, -step), (step, 0), (-step, 0)]
+            else:  # Horizontal preferred - try horizontal escapes first
+                direction_order = [(step, 0), (-step, 0), (0, step), (0, -step)]
+            
+            for dx, dy in direction_order:
                 escape_x = gx + dx
                 escape_y = gy + dy
                 
@@ -995,8 +1203,19 @@ class DeterministicManhattanRouter:
         # Choose closest escape point
         escape_x, escape_y, distance = min(escape_points, key=lambda p: p[2])
         
-        # Create F.Cu trace from pad to escape point
+        # Create F.Cu trace from pad to escape point with GRID-ALIGNED via placement
         world_escape_x, world_escape_y = self.grid_to_world(escape_x, escape_y)
+        
+        # CRITICAL: Force via to exact grid alignment for DRC compliance
+        # Snap to nearest 0.4mm grid position
+        grid_snap = self.config.grid_pitch
+        world_escape_x = round(world_escape_x / grid_snap) * grid_snap
+        world_escape_y = round(world_escape_y / grid_snap) * grid_snap
+        
+        # Ensure F.Cu trace is perfectly vertical (DRC requirement)
+        if abs(world_escape_x - pad_x) > abs(world_escape_y - pad_y):
+            # Horizontal escape - force to vertical
+            world_escape_x = pad_x  # Keep X same, only change Y
         
         escape_track = {
             'start_x': pad_x,
@@ -1071,13 +1290,21 @@ class DeterministicManhattanRouter:
         gx, gy = self.world_to_grid(pad_x, pad_y)
         fcu_idx = self.layer_mapping.get('F.Cu', 0)
         
-        # Find entry direction on F.Cu (horizontal preferred since F.Cu is horizontal)
+        # Find entry direction on F.Cu (vertical preferred since F.Cu is typically vertical)
         entry_points = []
         
-        # Try taxicab ring order for entry points
+        # Get F.Cu layer direction
+        fcu_direction = self.layer_directions.get(fcu_idx, 'V')  # Default to vertical
+        
+        # Try taxicab ring order for entry points  
         for step in range(1, 6):  # Try distances 1-5 grid cells
-            # Horizontal entries first (F.Cu preferred direction)
-            for dx, dy in [(step, 0), (-step, 0), (0, step), (0, -step)]:
+            # Prioritize entries in the layer's preferred direction
+            if fcu_direction == 'V':  # Vertical preferred - try vertical entries first
+                direction_order = [(0, step), (0, -step), (step, 0), (-step, 0)]
+            else:  # Horizontal preferred - try horizontal entries first
+                direction_order = [(step, 0), (-step, 0), (0, step), (0, -step)]
+            
+            for dx, dy in direction_order:
                 entry_x = gx + dx
                 entry_y = gy + dy
                 
@@ -1105,8 +1332,19 @@ class DeterministicManhattanRouter:
         # Choose closest entry point
         entry_x, entry_y, distance = min(entry_points, key=lambda p: p[2])
         
-        # Create F.Cu trace from entry point to pad (reversed from escape)
+        # Create F.Cu trace from entry point to pad with GRID-ALIGNED via placement
         world_entry_x, world_entry_y = self.grid_to_world(entry_x, entry_y)
+        
+        # CRITICAL: Force via to exact grid alignment for DRC compliance
+        # Snap to nearest 0.4mm grid position
+        grid_snap = self.config.grid_pitch
+        world_entry_x = round(world_entry_x / grid_snap) * grid_snap
+        world_entry_y = round(world_entry_y / grid_snap) * grid_snap
+        
+        # Ensure F.Cu trace is perfectly vertical (DRC requirement)
+        if abs(world_entry_x - pad_x) > abs(world_entry_y - pad_y):
+            # Horizontal entry - force to vertical
+            world_entry_x = pad_x  # Keep X same, only change Y
         
         entry_track = {
             'start_x': world_entry_x,
@@ -1236,10 +1474,17 @@ class DeterministicManhattanRouter:
         g_scores = {start: 0}
         
         timeout_start = time.time()
+        max_iterations = 10000  # FAST-FAIL: Limit search iterations for 0.1s timeout
+        iteration_count = 0
         
         while open_set:
-            if time.time() - timeout_start > self.config.timeout_per_net:
-                return None  # Timeout
+            iteration_count += 1
+            
+            # AGGRESSIVE FAST-FAIL: Multiple exit conditions
+            if (time.time() - timeout_start > self.config.timeout_per_net or
+                iteration_count > max_iterations or
+                len(closed_set) > 5000):  # Limit explored nodes
+                return None  # Fast timeout
             
             f_cost, g_cost, current = heapq.heappop(open_set)
             
@@ -1547,14 +1792,25 @@ class DeterministicManhattanRouter:
             logger.debug("No nets found to rip up in target area")
             return None
         
-        # Select net with most usage in the area (most blocking)
-        best_net = max(net_usage_count.keys(), key=lambda k: net_usage_count[k])
+        # AGGRESSIVE RIPUP: Select net with most usage in the area (most blocking)
+        # But prioritize recently routed nets (easier to re-route)
+        sorted_nets = sorted(net_usage_count.keys(), 
+                           key=lambda k: (net_usage_count[k], -k),  # Higher usage first, recent nets second
+                           reverse=True)
         
-        # Remove the selected net from grids
+        best_net = sorted_nets[0]
+        
+        # FAST RIPUP: Only clear cells in the blocking area + small margin (not entire board)
+        ripup_margin = 2
+        clear_min_x = max(0, min_x - ripup_margin)
+        clear_max_x = min(self.grid_width - 1, max_x + ripup_margin)
+        clear_min_y = max(0, min_y - ripup_margin)
+        clear_max_y = min(self.grid_height - 1, max_y + ripup_margin)
+        
         cells_cleared = 0
         for layer in range(self.num_layers):
-            for y in range(self.grid_height):
-                for x in range(self.grid_width):
+            for y in range(clear_min_y, clear_max_y + 1):
+                for x in range(clear_min_x, clear_max_x + 1):
                     if self.net_id_grid[layer, y, x] == best_net:
                         self.occupancy[layer, y, x] = 0
                         self.net_id_grid[layer, y, x] = 0
@@ -1584,3 +1840,305 @@ class DeterministicManhattanRouter:
         x = self.min_x + grid_x * self.config.grid_pitch
         y = self.min_y + grid_y * self.config.grid_pitch
         return x, y
+
+    def is_horizontal(self, layer_name: str) -> bool:
+        """Determine if a layer has horizontal traces"""
+        if layer_name == "F.Cu":
+            return False  # F.Cu is vertical for proper DRC compliance
+        if layer_name == "B.Cu":
+            return False  # B.Cu is vertical
+        if layer_name.startswith("In"):
+            try:
+                n = int(layer_name[2:-3])  # "In5.Cu" -> 5
+                return (n % 2 == 1)        # 1,3,5,7,9 -> horizontal
+            except ValueError:
+                return False  # Fallback for invalid names
+        return False  # Default to vertical
+
+    def _generate_fabric_network(self) -> FabricNetwork:
+        """Generate complete routing fabric on internal layers"""
+        logger.info("🏗️ Generating routing fabric on internal layers")
+        
+        segments = {}
+        nodes = {}
+        layer_segments = {}
+        
+        # Define fabric spacing (2x grid pitch for DRC clearance)
+        fabric_spacing = self.config.grid_pitch * 2.0  # 0.8mm spacing
+        
+        # Get internal layer names (exclude F.Cu and B.Cu)
+        internal_layers = []
+        for layer_name, layer_idx in self.layer_mapping.items():
+            if layer_name not in ['F.Cu', 'B.Cu']:
+                internal_layers.append((layer_name, layer_idx))
+        
+        # Add B.Cu to the fabric system
+        if 'B.Cu' in self.layer_mapping:
+            internal_layers.append(('B.Cu', self.layer_mapping['B.Cu']))
+        
+        logger.info(f"Creating fabric on {len(internal_layers)} layers: {[name for name, _ in internal_layers]}")
+        
+        # Generate fabric segments for each layer
+        for layer_name, layer_idx in internal_layers:
+            layer_segments[layer_name] = []
+            is_horizontal = self.is_horizontal(layer_name)
+            
+            if is_horizontal:
+                # Horizontal traces: one continuous trace per row
+                y = self.min_y + fabric_spacing
+                row = 0
+                while y < self.max_y - fabric_spacing:
+                    x_start = self.min_x + fabric_spacing
+                    x_end = self.max_x - fabric_spacing
+                    
+                    # Create ONE continuous horizontal trace across entire width
+                    seg_id = f"{layer_name}_H_{row}"
+                    
+                    segment = FabricSegment(
+                        segment_id=seg_id,
+                        layer_name=layer_name,
+                        start_x=x_start,
+                        start_y=y,
+                        end_x=x_end,
+                        end_y=y,
+                        is_horizontal=True
+                    )
+                    segments[seg_id] = segment
+                    layer_segments[layer_name].append(seg_id)
+                    
+                    y += fabric_spacing
+                    row += 1
+            else:
+                # Vertical traces: one continuous trace per column
+                x = self.min_x + fabric_spacing
+                col = 0
+                while x < self.max_x - fabric_spacing:
+                    y_start = self.min_y + fabric_spacing
+                    y_end = self.max_y - fabric_spacing
+                    
+                    # Create ONE continuous vertical trace across entire height
+                    seg_id = f"{layer_name}_V_{col}"
+                    
+                    segment = FabricSegment(
+                        segment_id=seg_id,
+                        layer_name=layer_name,
+                        start_x=x,
+                        start_y=y_start,
+                        end_x=x,
+                        end_y=y_end,
+                        is_horizontal=False
+                    )
+                    segments[seg_id] = segment
+                    layer_segments[layer_name].append(seg_id)
+                    
+                    x += fabric_spacing
+                    col += 1
+        
+        # Generate via nodes at fabric intersections
+        node_id_counter = 0
+        for x in [self.min_x + fabric_spacing + i * fabric_spacing 
+                  for i in range(int((self.max_x - self.min_x - 2*fabric_spacing) / fabric_spacing))]:
+            for y in [self.min_y + fabric_spacing + i * fabric_spacing 
+                      for i in range(int((self.max_y - self.min_y - 2*fabric_spacing) / fabric_spacing))]:
+                
+                node_id = f"node_{node_id_counter}"
+                node_layers = [name for name, _ in internal_layers]
+                connected_segs = []
+                
+                # Find segments that connect to this node
+                for seg_id, segment in segments.items():
+                    if ((abs(segment.start_x - x) < 0.01 and abs(segment.start_y - y) < 0.01) or
+                        (abs(segment.end_x - x) < 0.01 and abs(segment.end_y - y) < 0.01)):
+                        connected_segs.append(seg_id)
+                
+                if connected_segs:  # Only create nodes that connect segments
+                    nodes[node_id] = FabricNode(
+                        node_id=node_id,
+                        x=x,
+                        y=y,
+                        layers=node_layers,
+                        connected_segments=connected_segs
+                    )
+                    node_id_counter += 1
+        
+        fabric = FabricNetwork(
+            segments=segments,
+            nodes=nodes,
+            layer_segments=layer_segments
+        )
+        
+        total_segments = len(segments)
+        total_nodes = len(nodes)
+        logger.info(f"✅ Generated fabric: {total_segments} segments, {total_nodes} nodes")
+        
+        return fabric
+
+    def _find_fabric_taps(self, start_x: float, start_y: float, end_x: float, end_y: float) -> List[Dict]:
+        """Find tap points where a net connects to fabric traces"""
+        if not self.fabric_network:
+            return []
+        
+        taps = []
+        
+        # Find horizontal fabric traces that can carry this net
+        for layer_name, segment_ids in self.fabric_network.layer_segments.items():
+            if not self.is_horizontal(layer_name):
+                continue  # Skip vertical layers for now, handle in next step
+                
+            for seg_id in segment_ids:
+                segment = self.fabric_network.segments[seg_id]
+                
+                # Check if this horizontal trace is between start and end Y coordinates
+                trace_y = segment.start_y
+                if min(start_y, end_y) <= trace_y <= max(start_y, end_y):
+                    # This trace can be tapped
+                    tap_x = (start_x + end_x) / 2  # Tap at midpoint X
+                    taps.append({
+                        'layer': layer_name,
+                        'trace_id': seg_id,
+                        'tap_x': tap_x,
+                        'tap_y': trace_y,
+                        'trace_start': (segment.start_x, segment.start_y),
+                        'trace_end': (segment.end_x, segment.end_y)
+                    })
+        
+        # Find vertical fabric traces
+        for layer_name, segment_ids in self.fabric_network.layer_segments.items():
+            if self.is_horizontal(layer_name):
+                continue  # Skip horizontal layers
+                
+            for seg_id in segment_ids:
+                segment = self.fabric_network.segments[seg_id]
+                
+                # Check if this vertical trace is between start and end X coordinates  
+                trace_x = segment.start_x
+                if min(start_x, end_x) <= trace_x <= max(start_x, end_x):
+                    # This trace can be tapped
+                    tap_y = (start_y + end_y) / 2  # Tap at midpoint Y
+                    taps.append({
+                        'layer': layer_name,
+                        'trace_id': seg_id,
+                        'tap_x': trace_x,
+                        'tap_y': tap_y,
+                        'trace_start': (segment.start_x, segment.start_y),
+                        'trace_end': (segment.end_x, segment.end_y)
+                    })
+        
+        return taps
+    
+    def _find_nearest_fabric_node(self, x: float, y: float) -> Optional[str]:
+        """Find nearest fabric node to given coordinates"""
+        if not self.fabric_network or not self.fabric_network.nodes:
+            return None
+        
+        min_distance = float('inf')
+        nearest_node_id = None
+        
+        for node_id, node in self.fabric_network.nodes.items():
+            dx = node.x - x
+            dy = node.y - y
+            distance = dx * dx + dy * dy  # Squared distance for efficiency
+            
+            if distance < min_distance:
+                min_distance = distance
+                nearest_node_id = node_id
+        
+        return nearest_node_id
+
+    def _cleanup_fabric_network(self) -> Dict[str, int]:
+        """Remove unused fabric segments and convert claimed segments to actual tracks"""
+        if not self.fabric_network:
+            return {'removed_segments': 0, 'converted_tracks': 0, 'added_vias': 0}
+        
+        logger.info("🧹 Cleaning up fabric network")
+        
+        removed_count = 0
+        converted_tracks = 0
+        added_vias = 0
+        
+        # Convert claimed fabric segments to actual routing tracks
+        for seg_id, segment in self.fabric_network.segments.items():
+            if segment.status == "CLAIMED" and segment.claimed_by_net:
+                # Convert fabric segment to track
+                track = Track(
+                    start_x=segment.start_x,
+                    start_y=segment.start_y,
+                    end_x=segment.end_x,
+                    end_y=segment.end_y,
+                    layer=segment.layer_name,
+                    width=self.config.track_width,
+                    net_id=int(segment.claimed_by_net.split('_')[-1]) if segment.claimed_by_net.startswith('net_') else 0
+                )
+                self.tracks.append(track)
+                converted_tracks += 1
+                logger.debug(f"Converted fabric segment {seg_id} to track on {segment.layer_name}")
+        
+        # Add inter-layer vias at fabric nodes where multiple layers are used by the same net
+        net_usage_per_node = {}  # node_id -> set of net_names using this node
+        
+        for seg_id, segment in self.fabric_network.segments.items():
+            if segment.status == "CLAIMED" and segment.claimed_by_net:
+                # Find nodes connected to this segment
+                for node_id, node in self.fabric_network.nodes.items():
+                    if seg_id in node.connected_segments:
+                        if node_id not in net_usage_per_node:
+                            net_usage_per_node[node_id] = set()
+                        net_usage_per_node[node_id].add(segment.claimed_by_net)
+        
+        # Add vias between fabric layers where nets transition
+        for node_id, nets_using_node in net_usage_per_node.items():
+            if len(nets_using_node) == 1:  # Only one net uses this node
+                net_name = list(nets_using_node)[0]
+                node = self.fabric_network.nodes[node_id]
+                
+                # Check if this net uses multiple layers at this node
+                layers_used = set()
+                for seg_id in node.connected_segments:
+                    segment = self.fabric_network.segments[seg_id]
+                    if segment.status == "CLAIMED" and segment.claimed_by_net == net_name:
+                        layers_used.add(segment.layer_name)
+                
+                # Add vias between adjacent layers
+                if len(layers_used) > 1:
+                    sorted_layers = sorted(layers_used, key=lambda x: self.layer_mapping.get(x, 0))
+                    for i in range(len(sorted_layers) - 1):
+                        from_layer = sorted_layers[i]
+                        to_layer = sorted_layers[i + 1]
+                        
+                        via = Via(
+                            x=node.x,
+                            y=node.y,
+                            drill=self.config.via_drill,
+                            diameter=self.config.via_diameter,
+                            from_layer=from_layer,
+                            to_layer=to_layer,
+                            net_id=int(net_name.split('_')[-1]) if net_name.startswith('net_') else 0
+                        )
+                        self.vias.append(via)
+                        added_vias += 1
+                        logger.debug(f"Added fabric via {from_layer}->{to_layer} at ({node.x:.3f}, {node.y:.3f})")
+        
+        # Remove unclaimed fabric segments (they're not needed)
+        segments_to_remove = []
+        for seg_id, segment in self.fabric_network.segments.items():
+            if segment.status == "AVAILABLE":  # Unused fabric
+                segments_to_remove.append(seg_id)
+        
+        for seg_id in segments_to_remove:
+            del self.fabric_network.segments[seg_id]
+            removed_count += 1
+        
+        # Clean up layer_segments mapping
+        for layer_name in self.fabric_network.layer_segments:
+            self.fabric_network.layer_segments[layer_name] = [
+                seg_id for seg_id in self.fabric_network.layer_segments[layer_name]
+                if seg_id in self.fabric_network.segments
+            ]
+        
+        logger.info(f"✅ Fabric cleanup: {removed_count} unused segments removed, {converted_tracks} fabric tracks converted, {added_vias} vias added")
+        
+        return {
+            'removed_segments': removed_count, 
+            'converted_tracks': converted_tracks,
+            'added_vias': added_vias
+        }
