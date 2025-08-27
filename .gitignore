@@ -112,6 +112,9 @@ standalone_*.py
 quick_*.py
 *temp*.py
 
+# Debug output directory
+debug_output/
+
 # GPU profiling outputs
 *.nvvp
 *.nsys-rep
