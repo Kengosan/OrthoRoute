@@ -455,7 +455,7 @@ class RichKiCadInterface:
             pads = _ipc_retry(board.get_pads, "get_pads", max_retries=3, sleep_s=0.5)
             if pads and len(pads) > 0:
                 pad_positions = []
-                for p in pads[:100]:  # Sample first 100 pads for performance
+                for p in pads:  # Use all pads for accurate bounds calculation
                     try:
                         pos = getattr(p, 'position', None)
                         if pos is not None:

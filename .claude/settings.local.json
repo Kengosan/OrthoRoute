@@ -25,7 +25,14 @@
       "Bash(timeout 30 python main.py plugin)",
       "Bash(timeout 120 python main.py plugin)",
       "Bash(pip install:*)",
-      "Bash(timeout 90 python main.py plugin)"
+      "Bash(timeout 90 python main.py plugin)",
+      "Read(c:\\Users\\Benchoff\\Documents\\GitHub\\OrthoRoute/**)",
+      "Read(c:\\Users\\Benchoff\\Documents\\GitHub\\OrthoRoute/**)",
+      "Read(c:\\Users\\Benchoff\\Documents\\GitHub\\OrthoRoute/**)",
+      "Read(/C:\\Users\\Benchoff\\Documents\\GitHub\\OrthoRoute/**)",
+      "Read(/C:\\Users\\Benchoff\\Documents\\GitHub\\OrthoRoute/**)",
+      "Bash(timeout:*)",
+      "Read(//c/Users/Benchoff/Desktop/**)"
     ],
     "deny": [],
     "ask": [],

@@ -1,13 +1,17 @@
-"""Manhattan routing algorithm - cleaned up architecture."""
-from .manhattan_router_rrg import ManhattanRRGRoutingEngine
-from .rrg import RoutingResourceGraph, PathFinderRouter, RoutingConfig, RouteRequest, RouteResult
-from .sparse_rrg_builder import SparseRRGBuilder
-from .wavefront_pathfinder import GPUWavefrontPathfinder
-from .types import Pad, Via, Track
+"""
+Clean Manhattan Routing Algorithm - GPU-First Implementation
+
+This module provides a clean, GPU-accelerated implementation of Manhattan routing
+using a 3D lattice and PathFinder algorithm for dense PCB routing.
+"""
+
+from .manhattan_router_rrg import ManhattanRouterRRG, ManhattanRRGRoutingEngine
+from .lattice_builder import LatticeBuilder
+from .gpu_pathfinder import GPUPathFinder
 
 __all__ = [
+    'ManhattanRouterRRG',
     'ManhattanRRGRoutingEngine', 
-    'RoutingResourceGraph', 'PathFinderRouter', 'RoutingConfig', 'RouteRequest', 'RouteResult',
-    'SparseRRGBuilder', 'GPUWavefrontPathfinder',
-    'Pad', 'Via', 'Track'
+    'LatticeBuilder',
+    'GPUPathFinder'
 ]

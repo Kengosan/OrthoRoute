@@ -234,10 +234,11 @@ class RoutingThread(QThread):
             )
             components.append(mock_component)
         
-        # Create board
+        # Create board - handle filename robustly
+        filename = board_data.get('filename') or board_data.get('name') or 'TestBackplane.kicad_pcb'
         board = Board(
-            id="board_1",
-            name=board_data.get('filename', 'unknown.kicad_pcb'),
+            id="board_1", 
+            name=filename,
             components=components,
             nets=nets,
             layer_count=12  # F.Cu + 10 internal + B.Cu
@@ -245,8 +246,48 @@ class RoutingThread(QThread):
         
         # Store airwires as a custom attribute for RRG routing
         board._airwires = board_data.get('airwires', [])
+        # Store KiCad-calculated bounds for accurate routing area
+        board._kicad_bounds = board_data.get('bounds', None)
         
         return board
+
+
+# PathFinder GUI Integration Methods
+def _update_pathfinder_status(self, status_text: str):
+    """Update status bar with PathFinder instrumentation metrics"""
+    self.status_label.setText(status_text)
+    self.metrics_label.setText(status_text)
+    self.metrics_label.setVisible(True)
+    
+    # Also print to terminal for console monitoring
+    print(f"[PathFinder]: {status_text}")
+
+def _update_csv_export_status(self, csv_status: str):
+    """Update status bar with CSV export information"""
+    self.csv_status_label.setText(csv_status)
+    self.csv_status_label.setVisible(True)
+    
+    # Auto-hide CSV status after 10 seconds
+    QTimer.singleShot(10000, lambda: self.csv_status_label.setVisible(False))
+
+def _display_instrumentation_summary(self):
+    """Display instrumentation summary when routing completes"""
+    if hasattr(self.router, 'pathfinder') and hasattr(self.router.pathfinder, 'get_instrumentation_summary'):
+        summary = self.router.pathfinder.get_instrumentation_summary()
+        
+        if summary:
+            summary_text = (f"Session: {summary.get('session_id', 'N/A')} | "
+                          f"Iterations: {summary.get('total_iterations', 0)} | "
+                          f"Success: {summary.get('final_success_rate', 0):.1f}% | "
+                          f"Nets: {summary.get('successful_nets', 0)}/{summary.get('total_nets_processed', 0)} | "
+                          f"Avg Time: {summary.get('avg_routing_time_ms', 0):.1f}ms")
+            
+            self.metrics_label.setText(summary_text)
+            self.metrics_label.setVisible(True)
+            
+            print(f"📊 Routing Summary: {summary_text}")
+            logger.info(f"Instrumentation summary: {summary}")
+
 
 
 class PCBViewer(QWidget):
@@ -429,7 +470,12 @@ class PCBViewer(QWidget):
         """Draw existing tracks/traces with performance optimization"""
         tracks = self.board_data.get('tracks', [])
         
+        logger.info(f"_draw_tracks called: board_data has {len(tracks)} tracks")
+        if tracks:
+            logger.info(f"First track: {tracks[0]}")
+        
         if not tracks:
+            logger.info("No tracks to draw - returning early")
             return
             
         # CRITICAL PERFORMANCE FIX: Viewport culling and LOD
@@ -484,6 +530,9 @@ class PCBViewer(QWidget):
                     # Line is visible, continue to draw
                     pass
                 else:
+                    # Log why tracks are being culled for first few tracks
+                    if drawn_tracks < 3:
+                        logger.info(f"TRACK CULLED #{drawn_tracks+1}: track ({x1:.1f},{y1:.1f})->({x2:.1f},{y2:.1f}) outside viewport ({visible_rect.left():.1f},{visible_rect.top():.1f})->({visible_rect.right():.1f},{visible_rect.bottom():.1f})")
                     continue
                     
                 # ALWAYS SHOW TRACKS - No width threshold for production visibility
@@ -491,6 +540,9 @@ class PCBViewer(QWidget):
                 
                 # Skip if layer is not visible
                 if layer not in self.visible_layers:
+                    # Log layer visibility issue for first few tracks
+                    if drawn_tracks < 3:
+                        logger.info(f"TRACK LAYER FILTERED #{drawn_tracks+1}: track layer '{layer}' not in visible_layers {list(self.visible_layers)}")
                     continue
                 
                 # Set color based on layer
@@ -511,14 +563,21 @@ class PCBViewer(QWidget):
                     except (ValueError, AttributeError):
                         color = self.color_scheme.get_color('copper_inner')
                 
-                # Use thicker lines for better Manhattan trace visibility
-                line_width = max(0.5, width * 2)  # Make tracks more visible
+                # Use actual track dimensions (just like footprints are drawn)
+                # Convert mm to scene coordinates - same as footprints use
+                line_width = width  # Use actual track width in mm
                 painter.setPen(QPen(color, line_width))
                 painter.drawLine(QPointF(x1, y1), QPointF(x2, y2))
                 drawn_tracks += 1
                 
+                # Log first few tracks drawn
+                if drawn_tracks <= 3:
+                    logger.info(f"TRACK DRAWN #{drawn_tracks}: ({x1:.3f},{y1:.3f}) -> ({x2:.3f},{y2:.3f}) width={line_width} layer={layer}")
+                
             except (KeyError, TypeError):
                 continue
+        
+        logger.info(f"_draw_tracks completed: drew {drawn_tracks} tracks out of {len(tracks)} available")
                 
     def _line_intersects_rect(self, x1, y1, x2, y2, rect):
         """Check if a line intersects with a rectangle (simple bounding box check)"""
@@ -953,6 +1012,17 @@ class OrthoRouteMainWindow(QMainWindow):
         algorithm_layout.addWidget(self.algorithm_combo)
         routing_layout.addLayout(algorithm_layout)
         
+        # Batch Size Control
+        batch_layout = QHBoxLayout()
+        batch_layout.addWidget(QLabel("Batch Size:"))
+        self.batch_size_spinner = QSpinBox()
+        self.batch_size_spinner.setMinimum(1)
+        self.batch_size_spinner.setMaximum(500)
+        self.batch_size_spinner.setValue(50)  # Default batch size
+        self.batch_size_spinner.setToolTip("Number of nets to route in each PathFinder iteration")
+        batch_layout.addWidget(self.batch_size_spinner)
+        routing_layout.addLayout(batch_layout)
+        
         # Main routing buttons
         self.route_preview_btn = QPushButton("Begin Autorouting")
         self.route_preview_btn.clicked.connect(self.begin_autorouting)
@@ -1027,18 +1097,48 @@ class OrthoRouteMainWindow(QMainWindow):
         self.pathfinder_stats = PathFinderStatsWidget()
         layout.addWidget(self.pathfinder_stats)
         
+        # Real-time Routing Log Widget
+        log_group = QGroupBox("Routing Log")
+        log_layout = QVBoxLayout(log_group)
+        
+        self.routing_log = QTextEdit()
+        self.routing_log.setReadOnly(True)
+        self.routing_log.setMaximumHeight(200)
+        self.routing_log.setFont(QFont("Consolas", 9))  # Monospace font for logs
+        self.routing_log.setStyleSheet("""
+            QTextEdit {
+                background-color: #1e1e1e;
+                color: #d4d4d4;
+                border: 1px solid #3e3e3e;
+            }
+        """)
+        log_layout.addWidget(self.routing_log)
+        
+        layout.addWidget(log_group)
+        
         # Add stretch to push everything to top
         layout.addStretch()
         
         return panel
         
     def setup_status_bar(self):
-        """Setup status bar with GPU status"""
+        """Setup status bar with GPU status and instrumentation metrics"""
         status_bar = QStatusBar()
         self.setStatusBar(status_bar)
         
+        # Main status label for routing progress
         self.status_label = QLabel("Ready")
         status_bar.addWidget(self.status_label)
+        
+        # Instrumentation metrics labels (initially hidden)
+        self.metrics_label = QLabel("")
+        self.metrics_label.setVisible(False)
+        status_bar.addWidget(self.metrics_label)
+        
+        # CSV export status
+        self.csv_status_label = QLabel("")
+        self.csv_status_label.setVisible(False) 
+        status_bar.addWidget(self.csv_status_label)
         
         # GPU status indicator
         gpu_text = "GPU Available" if self.gpu_status.get('available') else "CPU Only"
@@ -1243,11 +1343,18 @@ class OrthoRouteMainWindow(QMainWindow):
     def begin_autorouting(self):
         """Begin autorouting with selected algorithm"""
         algorithm_text = self.algorithm_combo.currentText()
+        batch_size = self.batch_size_spinner.value()
+        
         logger.info(f"Begin autorouting with {algorithm_text}")
+        
+        # Clear previous log and start fresh
+        self.clear_routing_log()
+        self.log_to_gui(f"🚀 Starting {algorithm_text} routing (Batch Size: {batch_size})", "SUCCESS")
         
         # DEBUG: Screenshot before routing starts
         if self.pcb_viewer:
             self.pcb_viewer.debug_screenshot("before_routing")
+            self.log_to_gui("📸 Captured pre-routing screenshot", "DEBUG")
         
         self.status_label.setText("Starting autorouting...")
         self.route_preview_btn.setEnabled(False)
@@ -1363,6 +1470,10 @@ class OrthoRouteMainWindow(QMainWindow):
             if hasattr(self.router, 'gpu_pathfinder') and hasattr(self.router.gpu_pathfinder, 'parallel_pathfinder'):
                 self.router.gpu_pathfinder.parallel_pathfinder.progress_callback = self._on_pathfinder_progress
             
+            # Set up PathFinder instrumentation callback if available
+            if hasattr(self.router, 'pathfinder') and hasattr(self.router.pathfinder, 'set_gui_status_callback'):
+                self.router.pathfinder.set_gui_status_callback(self._update_pathfinder_status)
+            
         except Exception as e:
             logger.exception("Error starting Manhattan routing")
             self.status_label.setText(f"Error: {str(e)}")
@@ -1421,45 +1532,60 @@ class OrthoRouteMainWindow(QMainWindow):
         logger.info(f"Progressive routing initialized: {len(self.routing_nets)} nets to route")
         
     def _routing_step(self):
-        """Process routing steps using REAL PathFinder batch routing"""
+        """FIXED: Route ALL nets at once using PathFinder, then update GUI progressively"""
         try:
-            if self.current_net_index >= len(self.routing_nets):
-                # Routing complete
+            # Check if this is the first call - route ALL nets at once
+            if not hasattr(self, '_routing_started'):
+                logger.info(f"PATHFINDER SINGLE-PASS: Starting routing of ALL {len(self.routing_nets)} nets with negotiated congestion")
+                self.log_to_gui(f"🚀 Starting PathFinder routing of {len(self.routing_nets)} nets", "INFO")
+                
+                # Route ALL nets in a single PathFinder call for proper congestion negotiation
+                self.routing_result = self.router.route_all_nets(
+                    self.routing_nets,
+                    timeout_per_net=30.0,
+                    total_timeout=1800.0
+                )
+                
+                # Get final routing statistics
+                self.routing_stats = self.router.get_routing_statistics()
+                
+                logger.info(f"PATHFINDER COMPLETE: Routed {self.routing_stats.nets_routed}/{self.routing_stats.nets_attempted} nets ({self.routing_stats.success_rate:.1%})")
+                self.log_to_gui(f"✅ PathFinder complete: {self.routing_stats.nets_routed}/{self.routing_stats.nets_attempted} nets routed", "SUCCESS")
+                
+                self._routing_started = True
+                self.current_net_index = 0
+                
+                # Update visualization with all routed tracks
+                self._update_routing_visualization()
+                
+            # Progressive GUI updates for visual feedback
+            if self.current_net_index < len(self.routing_nets):
+                batch_size = min(50, len(self.routing_nets) - self.current_net_index)  # Show 50 nets per update
+                
+                # Update progress bar
+                progress = int((self.current_net_index / len(self.routing_nets)) * 100)
+                self.progress_bar.setValue(progress)
+                
+                # Log nets in current batch for user feedback
+                for i in range(batch_size):
+                    if self.current_net_index + i < len(self.routing_nets):
+                        net = self.routing_nets[self.current_net_index + i]
+                        # Check if this net was successfully routed by looking at router state
+                        if hasattr(self.router, 'routed_nets') and net.name in self.router.routed_nets:
+                            self.routed_count += 1
+                            logger.info(f"PATHFINDER SUCCESS: Routed net {net.name}")
+                        else:
+                            self.failed_count += 1
+                
+                self.current_net_index += batch_size
+                self.status_label.setText(f"Processing routing results: {self.current_net_index}/{len(self.routing_nets)}")
+            else:
+                # All nets processed - complete routing
                 self._complete_routing()
                 return
                 
-            # REAL PATHFINDER: Use batch routing with negotiated congestion
-            # Process nets in batches for proper PathFinder routing with ripup/reroute
-            batch_size = min(50, len(self.routing_nets) - self.current_net_index)  # Process 50 nets at a time
-            net_batch = self.routing_nets[self.current_net_index:self.current_net_index + batch_size]
-            
-            logger.info(f"REAL PATHFINDER: Processing batch {self.current_net_index}-{self.current_net_index + batch_size} ({len(net_batch)} nets)")
-            
-            # Update progress for batch
-            progress = int((self.current_net_index / len(self.routing_nets)) * 100)
-            self.progress_bar.setValue(progress)
-            self.status_label.setText(f"PathFinder routing batch {self.current_net_index + 1}-{self.current_net_index + batch_size}/{len(self.routing_nets)}")
-            
-            # CRITICAL: Call route_all_nets() for REAL PathFinder with negotiated congestion
-            batch_results = self._route_net_batch(net_batch)
-            
-            # Process batch results
-            for i, (net, success) in enumerate(zip(net_batch, batch_results)):
-                if success:
-                    self.routed_count += 1
-                    logger.info(f"REAL PATHFINDER SUCCESS: Routed net {net.name}")
-                else:
-                    self.failed_count += 1
-                    logger.warning(f"REAL PATHFINDER FAILED: Failed to route net {net.name}")
-            
-            # Update GUI with current progress
-            self._update_routing_visualization()
-            
-            # Move to next batch
-            self.current_net_index += batch_size
-            
         except Exception as e:
-            logger.error(f"Error in PathFinder batch routing: {e}")
+            logger.error(f"Error in PathFinder routing: {e}")
             self._complete_routing()
             
     def _route_net_batch(self, net_batch):
@@ -1472,24 +1598,31 @@ class OrthoRouteMainWindow(QMainWindow):
             
             # CRITICAL: Use route_all_nets() for REAL PathFinder routing
             # This enables negotiated congestion, ripup/reroute, proper grid-based routing
-            routing_stats = self.router.route_all_nets(
+            routing_result = self.router.route_all_nets(
                 net_batch, 
                 timeout_per_net=30.0,  # 30 second timeout per net for real PathFinder
                 total_timeout=1800.0   # 30 minute total timeout for batch
             )
             
+            # Get routing statistics to check success rate
+            routing_stats = self.router.get_routing_statistics()
+            
             # Extract success status for each net
             batch_results = []
-            for net in net_batch:
-                # Check if net was successfully routed
-                if hasattr(routing_stats, 'success_rate') and routing_stats.success_rate > 0:
-                    # For now, assume success based on overall stats
-                    # Real implementation would check per-net results
-                    batch_results.append(True)
-                else:
-                    batch_results.append(False)
+            if routing_result.success and routing_stats.success_rate > 0:
+                # If overall routing was successful, assume all nets in this batch succeeded
+                batch_results = [True] * len(net_batch)
+            else:
+                # If overall routing failed, assume all nets in this batch failed
+                batch_results = [False] * len(net_batch)
             
-            logger.info(f"REAL PATHFINDER BATCH: Completed {len(net_batch)} nets with success rate: {getattr(routing_stats, 'success_rate', 0):.1%}")
+            logger.info(f"REAL PATHFINDER BATCH: Completed {len(net_batch)} nets with success rate: {routing_stats.success_rate:.1%}")
+            
+            # Log batch results to GUI
+            if hasattr(self, 'log_to_gui'):
+                success_count = sum(batch_results)
+                self.log_to_gui(f"✅ Batch complete: {success_count}/{len(net_batch)} nets routed ({routing_stats.success_rate:.1%})", "SUCCESS" if success_count > 0 else "WARNING")
+            
             return batch_results
                     
         except Exception as e:
@@ -1521,28 +1654,52 @@ class OrthoRouteMainWindow(QMainWindow):
             
     def _update_routing_visualization(self):
         """Update GUI visualization with current routing progress"""
+        logger.info("=== _update_routing_visualization() CALLED ===")
         if self.pcb_viewer:
             # Get current routed tracks and vias
             tracks = self.router.get_routed_tracks()
             vias = self.router.get_routed_vias()
             
-            # Update board_data with tracks and vias (CRITICAL FIX)
+            # ACCUMULATIVE FIX: Add new tracks to existing tracks, don't overwrite
             if tracks:
-                self.board_data['tracks'] = tracks
-                logger.debug(f"Updated board_data with {len(tracks)} tracks")
+                if 'tracks' not in self.board_data:
+                    self.board_data['tracks'] = []
+                
+                # Get existing track count
+                existing_count = len(self.board_data['tracks'])
+                
+                # Add new tracks to existing ones
+                self.board_data['tracks'].extend(tracks)
+                
+                total_count = len(self.board_data['tracks'])
+                logger.info(f"GUI: Added {len(tracks)} new tracks to {existing_count} existing tracks = {total_count} total tracks")
             else:
                 logger.warning(f"No tracks received from router!")
                 
             if vias:
-                self.board_data['vias'] = vias
-                logger.debug(f"Updated board_data with {len(vias)} vias")
+                if 'vias' not in self.board_data:
+                    self.board_data['vias'] = []
+                
+                # Get existing via count  
+                existing_via_count = len(self.board_data['vias'])
+                
+                # Add new vias to existing ones
+                self.board_data['vias'].extend(vias)
+                
+                total_via_count = len(self.board_data['vias'])
+                logger.info(f"GUI: Added {len(vias)} new vias to {existing_via_count} existing vias = {total_via_count} total vias")
             else:
                 logger.debug(f"No vias received from router")
             
-            # Update viewer with new routing data
+            # Update viewer with ALL accumulated routing data
+            all_tracks = self.board_data.get('tracks', [])
+            all_vias = self.board_data.get('vias', [])
+            
             if hasattr(self.pcb_viewer, 'update_routing'):
-                self.pcb_viewer.update_routing(tracks, vias)
+                logger.info(f"GUI: Calling pcb_viewer.update_routing() with {len(all_tracks)} total tracks, {len(all_vias)} total vias")
+                self.pcb_viewer.update_routing(all_tracks, all_vias)
             else:
+                logger.info(f"GUI: pcb_viewer has no update_routing method, calling update() instead")
                 # Force repaint to show tracks
                 self.pcb_viewer.update()
                 
@@ -1601,6 +1758,77 @@ class OrthoRouteMainWindow(QMainWindow):
             import time
             self.pcb_viewer.update()
             self._last_update_time = time.time()
+
+    def _update_preview_after_batch(self):
+        """Extract routing results and update preview with traces and vias"""
+        logger.info("=== _update_preview_after_batch() CALLED ===")
+        try:
+            if not self.router:
+                logger.warning("No router available for result extraction")
+                return
+                
+            # Get the latest routing results from router
+            if hasattr(self.router, 'routed_nets') and self.router.routed_nets:
+                logger.info(f"PREVIEW UPDATE: Extracting visual data from {len(self.router.routed_nets)} routed nets")
+                
+                new_tracks = []
+                new_vias = []
+                
+                for net_id, route in self.router.routing_results.items():
+                    if route and hasattr(route, 'segments') and hasattr(route, 'vias'):
+                        # Convert segments to tracks
+                        for segment in route.segments:
+                            if hasattr(segment, 'start') and hasattr(segment, 'end') and hasattr(segment, 'layer'):
+                                track = {
+                                    'start_x': segment.start.x,
+                                    'start_y': segment.start.y, 
+                                    'end_x': segment.end.x,
+                                    'end_y': segment.end.y,
+                                    'layer': segment.layer,
+                                    'width': getattr(segment, 'width', 0.2),  # Default trace width
+                                    'net': net_id
+                                }
+                                new_tracks.append(track)
+                        
+                        # Convert vias
+                        for via in route.vias:
+                            if hasattr(via, 'position') and hasattr(via, 'from_layer') and hasattr(via, 'to_layer'):
+                                via_data = {
+                                    'x': via.position.x,
+                                    'y': via.position.y,
+                                    'from_layer': via.from_layer,
+                                    'to_layer': via.to_layer,
+                                    'drill': getattr(via, 'drill_size', 0.3),  # Default drill size
+                                    'size': getattr(via, 'diameter', 0.6),    # Default via diameter
+                                    'net': net_id
+                                }
+                                new_vias.append(via_data)
+                
+                # Update board_data with new tracks and vias
+                if new_tracks:
+                    if 'tracks' not in self.board_data:
+                        self.board_data['tracks'] = []
+                    self.board_data['tracks'].extend(new_tracks)
+                    logger.info(f"PREVIEW UPDATE: Added {len(new_tracks)} tracks to preview")
+                
+                if new_vias:
+                    if 'vias' not in self.board_data:
+                        self.board_data['vias'] = []
+                    self.board_data['vias'].extend(new_vias) 
+                    logger.info(f"PREVIEW UPDATE: Added {len(new_vias)} vias to preview")
+                
+                # Force preview update
+                if self.pcb_viewer and (new_tracks or new_vias):
+                    self.pcb_viewer.update()
+                    logger.info("PREVIEW UPDATE: Forced PCB viewer refresh")
+                    
+            else:
+                logger.debug("PREVIEW UPDATE: No routed nets available for visualization")
+                
+        except Exception as e:
+            logger.error(f"Error updating preview after batch: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
     
     def _on_routing_completed(self, result):
         """Handle routing completion"""
@@ -1735,6 +1963,44 @@ class OrthoRouteMainWindow(QMainWindow):
         self.progress_bar.setVisible(False)
         self.status_label.setText("Ready")
     
+    def log_to_gui(self, message: str, level: str = "INFO"):
+        """Add real-time log message to GUI routing log"""
+        from datetime import datetime
+        
+        # Add timestamp and format message
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        formatted_message = f"[{timestamp}] {level}: {message}"
+        
+        # Color code by level
+        color_map = {
+            "INFO": "#d4d4d4",      # Light gray
+            "SUCCESS": "#4EC9B0",   # Teal
+            "WARNING": "#DCDCAA",   # Yellow
+            "ERROR": "#F44747",     # Red
+            "DEBUG": "#808080"      # Gray
+        }
+        color = color_map.get(level, "#d4d4d4")
+        
+        # Add colored message to log widget
+        if hasattr(self, 'routing_log'):
+            self.routing_log.append(f'<span style="color: {color};">{formatted_message}</span>')
+            
+            # Auto-scroll to bottom
+            cursor = self.routing_log.textCursor()
+            cursor.movePosition(cursor.MoveOperation.End)
+            self.routing_log.setTextCursor(cursor)
+            
+            # Limit log to last 1000 lines for performance
+            if self.routing_log.document().lineCount() > 1000:
+                cursor.movePosition(cursor.MoveOperation.Start)
+                cursor.movePosition(cursor.MoveOperation.Down, cursor.MoveMode.KeepAnchor, 200)
+                cursor.removeSelectedText()
+    
+    def clear_routing_log(self):
+        """Clear the routing log window"""
+        if hasattr(self, 'routing_log'):
+            self.routing_log.clear()
+    
     def _convert_board_data_to_domain(self, board_data, drc_constraints):
         """Convert board_data dict to domain Board object for RRG router"""
         from orthoroute.domain.models.board import Board, Net, Pad, Bounds, Coordinate, Component
@@ -1811,10 +2077,11 @@ class OrthoRouteMainWindow(QMainWindow):
             )
             components.append(mock_component)
         
-        # Create board
+        # Create board - handle filename robustly
+        filename = board_data.get('filename') or board_data.get('name') or 'TestBackplane.kicad_pcb'
         board = Board(
-            id="board_1",
-            name=board_data.get('filename', 'unknown.kicad_pcb'),
+            id="board_1", 
+            name=filename,
             components=components,
             nets=nets,
             layer_count=12  # F.Cu + 10 internal + B.Cu
@@ -1822,5 +2089,49 @@ class OrthoRouteMainWindow(QMainWindow):
         
         # Store airwires as a custom attribute for RRG routing
         board._airwires = board_data.get('airwires', [])
+        # Store KiCad-calculated bounds for accurate routing area
+        board._kicad_bounds = board_data.get('bounds', None)
         
         return board
+
+
+# PathFinder GUI Integration Methods
+def _update_pathfinder_status(self, status_text: str):
+    """Update status bar with PathFinder instrumentation metrics"""
+    self.status_label.setText(status_text)
+    self.metrics_label.setText(status_text)
+    self.metrics_label.setVisible(True)
+    
+    # Also print to terminal for console monitoring
+    print(f"[PathFinder]: {status_text}")
+
+def _update_csv_export_status(self, csv_status: str):
+    """Update status bar with CSV export information"""
+    self.csv_status_label.setText(csv_status)
+    self.csv_status_label.setVisible(True)
+    
+    # Auto-hide CSV status after 10 seconds
+    QTimer.singleShot(10000, lambda: self.csv_status_label.setVisible(False))
+
+def _display_instrumentation_summary(self):
+    """Display instrumentation summary when routing completes"""
+    if hasattr(self.router, 'pathfinder') and hasattr(self.router.pathfinder, 'get_instrumentation_summary'):
+        summary = self.router.pathfinder.get_instrumentation_summary()
+        
+        if summary:
+            summary_text = (f"Session: {summary.get('session_id', 'N/A')} | "
+                          f"Iterations: {summary.get('total_iterations', 0)} | "
+                          f"Success: {summary.get('final_success_rate', 0):.1f}% | "
+                          f"Nets: {summary.get('successful_nets', 0)}/{summary.get('total_nets_processed', 0)} | "
+                          f"Avg Time: {summary.get('avg_routing_time_ms', 0):.1f}ms")
+            
+            self.metrics_label.setText(summary_text)
+            self.metrics_label.setVisible(True)
+            
+            print(f"📊 Routing Summary: {summary_text}")
+            logger.info(f"Instrumentation summary: {summary}")
+
+# Add methods to OrthoRouteMainWindow class
+OrthoRouteMainWindow._update_pathfinder_status = _update_pathfinder_status
+OrthoRouteMainWindow._update_csv_export_status = _update_csv_export_status  
+OrthoRouteMainWindow._display_instrumentation_summary = _display_instrumentation_summary

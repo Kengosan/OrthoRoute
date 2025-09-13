@@ -30,6 +30,9 @@ class RoutingSettings:
         "B.Cu": "vertical"
     })
     
+    # Debug settings
+    debug_single_roi: bool = False  # Force single ROI processing for debugging
+    
     def validate(self) -> List[str]:
         """Validate settings and return list of errors."""
         errors = []
