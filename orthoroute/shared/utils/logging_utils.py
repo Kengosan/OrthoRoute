@@ -27,8 +27,16 @@ def setup_logging(settings: LoggingSettings) -> None:
         datefmt=settings.date_format
     )
     
-    # Console handler
+    # Console handler with Windows Unicode fix
     if settings.console_output:
+        # Fix Windows console Unicode issues
+        if hasattr(sys.stdout, "reconfigure"):
+            try:
+                sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+                sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+
         console_handler = logging.StreamHandler(sys.stdout)
         console_handler.setLevel(getattr(logging, settings.level.upper()))
         console_handler.setFormatter(formatter)
@@ -61,7 +69,26 @@ def setup_logging(settings: LoggingSettings) -> None:
         component_logger = logging.getLogger(component)
         component_logger.setLevel(getattr(logging, level.upper()))
     
+    # INFO LOGGING FOR CLEAN DEMO OUTPUT
+    root_logger.setLevel(logging.INFO)
+    for h in root_logger.handlers:
+        h.setLevel(logging.INFO)
+    
+    # Add dedicated debug file handler (DEBUG to file only)
+    try:
+        debug_fh = logging.FileHandler("orthoroute_debug.log", mode="w", encoding="utf-8")
+        debug_fh.setLevel(logging.DEBUG)
+        debug_fh.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
+        root_logger.addHandler(debug_fh)
+        root_logger.info("[LOG] Debug file handler added: orthoroute_debug.log")
+    except Exception as e:
+        root_logger.error(f"Failed to add debug file handler: {e}")
+
+    # Ensure console shows only INFO and above
+    root_logger.info("[LOG] Console logging set to INFO level for clean demo output")
+    
     # Log startup message
+    root_logger.debug("[LOG] Debug level enabled on all handlers")
     root_logger.info("OrthoRoute logging initialized")
 
 
@@ -118,13 +145,36 @@ class ContextLogger:
         self.logger.critical(self._format_message(message), *args, **kwargs)
 
 
+def init_logging():
+    """Initialize logging with INFO+ to orthoroute_debug.log file."""
+    # Ensure file handler writes INFO+ and flushes
+    fh = logging.FileHandler("orthoroute_debug.log", encoding="utf-8", delay=False)
+    fh.setLevel(logging.INFO)
+    fmt = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+    fh.setFormatter(fmt)
+
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    root.addHandler(fh)
+
+    # Keep console handler as-is (INFO)
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(logging.INFO)
+    console_handler.setFormatter(fmt)
+    root.addHandler(console_handler)
+
+    # Ensure the UPF module logger is at INFO level for portal logs
+    upf_logger = logging.getLogger("orthoroute.algorithms.manhattan.unified_pathfinder")
+    upf_logger.setLevel(logging.INFO)
+
+
 def get_context_logger(name: str, **context) -> ContextLogger:
     """Get a context logger with additional information.
-    
+
     Args:
         name: Logger name
         **context: Context key-value pairs
-        
+
     Returns:
         ContextLogger instance
     """

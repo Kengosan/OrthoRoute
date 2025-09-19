@@ -197,10 +197,17 @@ class KiCadSWIGAdapter:
                 logger.error(f"Net {net_name} not found")
                 return False
             
+            # Quantization assert: Check for collapse after conversion to KiCad internal units
+            x0i, y0i = to_internal(start_x), to_internal(start_y)
+            x1i, y1i = to_internal(end_x), to_internal(end_y)
+            if x0i == x1i and y0i == y1i:
+                logger.error("[GUI-QUANT] collapse after quantization: (%.6f,%.6f)->(%.6f,%.6f) mm",
+                           start_x, start_y, end_x, end_y)
+
             # Create track
             track = pcbnew.PCB_TRACK(self.board)
-            track.SetStart(pcbnew.VECTOR2I(to_internal(start_x), to_internal(start_y)))
-            track.SetEnd(pcbnew.VECTOR2I(to_internal(end_x), to_internal(end_y)))
+            track.SetStart(pcbnew.VECTOR2I(x0i, y0i))
+            track.SetEnd(pcbnew.VECTOR2I(x1i, y1i))
             track.SetWidth(to_internal(width))
             track.SetLayer(layer_id)
             track.SetNet(netinfo)

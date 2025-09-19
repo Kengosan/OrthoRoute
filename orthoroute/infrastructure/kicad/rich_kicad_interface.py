@@ -40,6 +40,44 @@ class BoardData:
     drc_rules: Optional[DRCRules] = None
 
 
+def fetch_board_and_drc():
+    """Fetch board and DRC data using IPC API (proper method)"""
+    from kicad import KiCad
+
+    try:
+        kc = KiCad()                                   # IPC session (nng under the hood)
+        board = kc.get_board()                         # Active PCB document
+        project = kc.get_project()                     # Project owning the board
+
+        # Layers / stackup
+        layer_cnt = board.get_copper_layer_count()
+        stackup = board.get_stackup() if hasattr(board, 'get_stackup') else None
+
+        # Nets and classes
+        nets = board.get_nets()                        # [{id, name, ...}, ...]
+        net_names = [n.get("name", "") for n in nets if n.get("name")]
+        netclass_by_net = board.get_netclass_for_nets(net_names) if net_names else {}
+
+        # All net classes (for defaults/fallbacks)
+        all_netclasses = {nc.get("name", "Default"): nc for nc in project.get_net_classes()}
+
+        # Pad polygons (for DRC keepouts)
+        # returns dict keyed by pad or (ref, pad_name) -> polygon(s)
+        pad_polys = board.get_pad_shapes_as_polygons(include_holes=False) if hasattr(board, 'get_pad_shapes_as_polygons') else {}
+
+        return {
+            "board": board,
+            "layer_cnt": layer_cnt,
+            "stackup": stackup,
+            "nets": nets,
+            "netclass_by_net": netclass_by_net,
+            "all_netclasses": all_netclasses,
+            "pad_polys": pad_polys,
+        }
+    except Exception as e:
+        logger.error(f"IPC DRC fetch failed: {e}")
+        return None
+
 def _ipc_retry(func, desc: str, max_retries: int = 3, sleep_s: float = 0.5):
     last_err = None
     for attempt in range(1, max_retries + 1):
@@ -313,10 +351,10 @@ class RichKiCadInterface:
                     
                     pads.append(pad_data)
                     
-                    # Log first few pads for debugging
-                    if i < 20:
+                    # Log first few pads for debugging (gated behind DEBUG level)
+                    if i < 5 and logger.isEnabledFor(logging.DEBUG):
                         pad_type = "through-hole" if drill > 0 else "SMD"
-                        logger.info(f"{pad_type} Pad {i}: pos=({x:.2f}, {y:.2f}), size=({width:.2f}x{height:.2f}) (SMD) [{pad_type}], net='{net_name}'")
+                        logger.debug(f"{pad_type} Pad {i}: pos=({x:.2f}, {y:.2f}), size=({width:.2f}x{height:.2f}) (SMD) [{pad_type}], net='{net_name}'")
                         
                 except Exception as e:
                     logger.warning(f"Error extracting pad {i}: {e}")
@@ -437,18 +475,12 @@ class RichKiCadInterface:
     def _calculate_board_dimensions(self, board) -> Tuple[Tuple[float, float, float, float], float, float]:
         """Calculate board dimensions from KiCad API or pad positions"""
         try:
-            # First try KiCad API to get board info
-            board_info = _ipc_retry(board.get_board_info, "get_board_info", max_retries=3, sleep_s=0.5)
-            
-            if board_info and 'bounds' in board_info:
-                bounds = board_info['bounds']
-                min_x, min_y, max_x, max_y = bounds
-                width = max_x - min_x
-                height = max_y - min_y
-                return (min_x, min_y, max_x, max_y), width, height
-                
+            # IPC method doesn't have get_board_info - skip API board bounds
+            # We'll calculate from pad positions below
+            pass
+
         except Exception as e:
-            logger.warning(f"Could not calculate board dimensions from API: {e}")
+            logger.debug(f"Board dimensions API unavailable (expected with IPC): {e}")
         
         # Fallback: calculate from actual pad positions
         try:
@@ -513,15 +545,15 @@ class RichKiCadInterface:
     def _get_layer_count(self, board) -> int:
         """Get the number of copper layers using KiCad API with multiple detection methods"""
         
-        # Method 1: Try to get board info
+        # Method 1: Use proper IPC API for copper layer count
         try:
-            board_info = _ipc_retry(board.get_board_info, "get_board_info", max_retries=3, sleep_s=0.5)
-            if board_info and 'layers' in board_info:
-                logger.info(f"Got layer count from board_info: {board_info['layers']}")
-                return board_info['layers']
+            layer_count = _ipc_retry(board.get_copper_layer_count, "get_copper_layer_count", max_retries=3, sleep_s=0.5)
+            if layer_count and layer_count > 0:
+                logger.info(f"Got layer count from IPC API: {layer_count}")
+                return layer_count
         except Exception as e:
-            logger.debug(f"Method 1 failed - board_info: {e}")
-        
+            logger.debug(f"Method 1 failed - IPC copper layer count: {e}")
+
         # Method 2: Try to get layer stack
         try:
             stackup = _ipc_retry(board.get_stackup, "get_stackup", max_retries=3, sleep_s=0.5)
@@ -604,37 +636,86 @@ class RichKiCadInterface:
         return 2
 
     def _extract_drc_rules(self, board) -> Dict:
-        """Extract design rules and netclasses using KiCad API"""
+        """Extract design rules and netclasses using IPC API (proper method)"""
+        logger.info("Extracting DRC rules using IPC API...")
+
+        # Try IPC-based DRC extraction first
+        try:
+            ipc_data = fetch_board_and_drc()
+            if ipc_data and ipc_data.get('all_netclasses'):
+                return self._process_ipc_drc_data(ipc_data)
+        except Exception as e:
+            logger.warning(f"IPC-based DRC extraction failed: {e}")
+
+        # Fallback to safe defaults
+        logger.info("Using fallback DRC defaults")
+        return {
+            'netclasses': {
+                'Default': {
+                    'track_width': 0.2,
+                    'via_size': 0.8,
+                    'clearance': 0.2
+                }
+            },
+            'default_track_width': 0.2,
+            'default_via_size': 0.8,
+            'default_clearance': 0.2,
+            'netclass_by_net': {},
+            'pad_polygons': {}
+        }
+
+    def _process_ipc_drc_data(self, ipc_data: Dict) -> Dict:
+        """Process IPC DRC data into our expected format"""
         drc_data = {
             'netclasses': {},
             'default_track_width': 0.2,
             'default_via_size': 0.8,
-            'default_clearance': 0.2
+            'default_clearance': 0.2,
+            'netclass_by_net': ipc_data.get('netclass_by_net', {}),
+            'pad_polygons': ipc_data.get('pad_polys', {})
         }
-        
-        try:
-            # Use KiCad API to get DRC rules
-            design_rules = _ipc_retry(board.get_design_rules, "get_design_rules", max_retries=3, sleep_s=0.5)
-            
-            if design_rules:
-                # Extract default values
-                drc_data['default_track_width'] = design_rules.get('default_track_width', 0.2)
-                drc_data['default_via_size'] = design_rules.get('default_via_size', 0.8)
-                drc_data['default_clearance'] = design_rules.get('default_clearance', 0.2)
-                
-                # Extract netclasses
-                netclasses = design_rules.get('netclasses', {})
-                if 'Default' in netclasses:
-                    default_nc = netclasses['Default']
-                    drc_data['netclasses']['Default'] = {
-                        'track_width': default_nc.get('track_width', 0.2),
-                        'via_size': default_nc.get('via_size', 0.8),
-                        'clearance': default_nc.get('clearance', 0.2)
-                    }
-                    
-                    logger.info(f"  NetClass 'Default': track={drc_data['netclasses']['Default']['track_width']:.3f}mm via={drc_data['netclasses']['Default']['via_size']:.3f}mm clearance={drc_data['netclasses']['Default']['clearance']:.3f}mm")
-                
-        except Exception as e:
-            logger.warning(f"Could not extract DRC rules: {e}")
-            
+
+        # Process netclasses from IPC data
+        all_netclasses = ipc_data.get('all_netclasses', {})
+
+        for nc_name, nc_data in all_netclasses.items():
+            if not nc_data:
+                continue
+
+            # Extract netclass properties (IPC format)
+            track_width = nc_data.get('track_width', nc_data.get('TrackWidth', 0.2))
+            via_size = nc_data.get('via_size', nc_data.get('ViaDiameter', 0.8))
+            clearance = nc_data.get('clearance', nc_data.get('Clearance', 0.2))
+
+            # Convert to mm if needed (KiCad sometimes returns nanometers)
+            if track_width > 10:  # Likely in nanometers or micrometers
+                track_width = track_width / 1000000  # Convert nm to mm
+            if via_size > 10:
+                via_size = via_size / 1000000
+            if clearance > 10:
+                clearance = clearance / 1000000
+
+            drc_data['netclasses'][nc_name] = {
+                'track_width': track_width,
+                'via_size': via_size,
+                'clearance': clearance
+            }
+
+            logger.info(f"  NetClass '{nc_name}': track={track_width:.3f}mm via={via_size:.3f}mm clearance={clearance:.3f}mm")
+
+            # Set defaults from Default netclass
+            if nc_name == 'Default':
+                drc_data['default_track_width'] = track_width
+                drc_data['default_via_size'] = via_size
+                drc_data['default_clearance'] = clearance
+
+        # Ensure we have at least a Default netclass
+        if 'Default' not in drc_data['netclasses']:
+            drc_data['netclasses']['Default'] = {
+                'track_width': drc_data['default_track_width'],
+                'via_size': drc_data['default_via_size'],
+                'clearance': drc_data['default_clearance']
+            }
+            logger.info(f"  NetClass 'Default' (fallback): track={drc_data['default_track_width']:.3f}mm via={drc_data['default_via_size']:.3f}mm clearance={drc_data['default_clearance']:.3f}mm")
+
         return drc_data

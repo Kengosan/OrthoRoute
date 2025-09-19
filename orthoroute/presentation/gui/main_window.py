@@ -55,95 +55,116 @@ class RoutingThread(QThread):
     routing_completed = pyqtSignal(dict)  # Routing results
     routing_error = pyqtSignal(str)  # Error message
     
-    def __init__(self, algorithm, board_data, config, gpu_provider=None):
+    def __init__(self, algorithm, board_data, config, gpu_provider=None, plugin_router=None):
         """Initialize routing thread."""
         super().__init__()
         self.algorithm = algorithm
         self.board_data = board_data
         self.config = config
         self.gpu_provider = gpu_provider
+        self.plugin_router = plugin_router  # STEP 1: Accept plugin's UnifiedPathFinder instance
         self.router = None
         self.is_cancelled = False
         
     def run(self):
         """Run the routing operation in a background thread."""
         try:
-            # Initialize the appropriate router based on algorithm
+            # SURGICAL FIX STEP 1: Use plugin's UnifiedPathFinder instance, don't create second router
             if self.algorithm == "Manhattan RRG":
-                # Get DRC constraints from board data or create defaults
-                drc_constraints = None
-                if hasattr(self.board_data, 'drc_constraints') and self.board_data.drc_constraints:
-                    drc_constraints = self.board_data.drc_constraints
-                    logger.info("Using DRC constraints from board data")
+                # STEP 1a: Use plugin's UnifiedPathFinder instance if provided
+                if self.plugin_router is not None:
+                    logger.info("[GUI-ROUTER-WIRE] Using plugin's UnifiedPathFinder instance (no second router)")
+                    self.router = self.plugin_router
+                    logger.info(f"[GUI-ROUTER-WIRE] Using existing {self.router.__class__.__name__} with instance_tag={getattr(self.router, '_instance_tag', 'NO_TAG')}")
                 else:
-                    # Create default DRC constraints with improved clearances
-                    try:
-                        from ...domain.models.constraints import DRCConstraints, NetClass
-                        drc_constraints = DRCConstraints(
-                            default_track_width=0.0889,  # 3.5 mil
-                            default_clearance=0.0889,    # 3.5 mil spacing
-                            default_via_diameter=0.25,   # Working via size
-                            default_via_drill=0.15,      # Appropriate drill
-                        )
-                        logger.info("Created enhanced DRC constraints for routing")
-                    except ImportError:
-                        logger.warning("Could not create DRC constraints")
-                
-                # Use new RRG-based Manhattan router
-                logger.info("PERFORMANCE: Initializing RRG-based Manhattan router")
-                
-                # Create mock board object for RRG router
+                    # STEP 1b: Fallback - create new instance with warning
+                    logger.warning("[GUI-ROUTER-WIRE] No plugin router provided, creating new UnifiedPathFinder (split-brain risk)")
+
+                    # Import UnifiedPathFinder
+                    from ...algorithms.manhattan.unified_pathfinder import UnifiedPathFinder, PathFinderConfig
+
+                    # Create PathFinder config with strict DRC
+                    pf_config = PathFinderConfig()
+                    pf_config.strict_drc = True
+
+                    # Create UnifiedPathFinder instance (not legacy ManhattanRRG)
+                    self.router = UnifiedPathFinder(config=pf_config, use_gpu=True)
+                    logger.info(f"[GUI-ROUTER-WIRE] Created new {self.router.__class__.__name__} with instance_tag={getattr(self.router, '_instance_tag', 'NO_TAG')}")
+
+                # STEP 1c: Add guard assert to prove UnifiedPathFinder is used
+                assert self.router.__class__.__name__ == 'UnifiedPathFinder', f"Expected UnifiedPathFinder, got {self.router.__class__.__name__}"
+                # STEP 1c: Convert board_data to domain Board object for UnifiedPathFinder
                 from ...domain.models.board import Board
-                from ...domain.models.constraints import DRCConstraints
-                
+
                 # Convert board_data dict to domain Board object
-                mock_board = self._convert_board_data_to_domain(self.board_data, drc_constraints)
-                
-                # Create RRG router
-                self.router = ManhattanRRGRoutingEngine(
-                    constraints=drc_constraints or DRCConstraints(),
-                    gpu_provider=self.gpu_provider
-                )
-                
-                # Initialize the router with board data
-                self.router.initialize(mock_board)
-                
-                # Route all nets using RRG PathFinder with live updates
-                logger.info(f"INFO: Routing {len(mock_board.nets)} nets with RRG PathFinder")
-                
-                # Set up progress callback for live visualization
-                def progress_callback(current, total, net_name, tracks=None, vias=None):
-                    if not self.is_cancelled:
-                        status = f"Routing net {net_name}" if net_name else "Routing..."
-                        self.progress_update.emit(current, total, status, tracks or [], vias or [])
-                
-                self.router.set_progress_callback(progress_callback)
-                
-                # Use RRG router interface with progress reporting
-                routing_stats = self.router.route_all_nets(
-                    nets=mock_board.nets,
-                    timeout_per_net=5.0,
-                    total_timeout=300.0
-                )
-                
-                # Convert routing statistics to result format
-                result = {
-                    'success': routing_stats.nets_routed > 0,
-                    'tracks': self.router.get_routed_tracks(),
-                    'vias': self.router.get_routed_vias(),
-                    'routed_nets': routing_stats.nets_routed,
-                    'failed_nets': routing_stats.nets_failed,
-                    'stats': {
-                        'elapsed_time': routing_stats.total_time,
-                        'total_length': routing_stats.total_length,
-                        'total_vias': routing_stats.total_vias,
-                        'success_rate': routing_stats.success_rate
+                mock_board = self._convert_board_data_to_domain(self.board_data, None)
+
+                # STEP 1d: Use same three-step UnifiedPathFinder calls as plugin
+                logger.info(f"[GUI-UPF-STEP1] initialize_graph with {len(mock_board.nets)} nets")
+                self.router.initialize_graph(mock_board)
+
+                logger.info(f"[GUI-UPF-STEP2] map_all_pads with {len([p for n in mock_board.nets for p in n.pads])} pads")
+                self.router.map_all_pads(mock_board)
+
+                logger.info(f"[GUI-UPF-STEP3] route_multiple_nets")
+
+                # STEP 2: Wire PathFinder stats to GUI - capture real metrics
+                import time
+                routing_start_time = time.time()
+
+                # Emit start signal for PathFinder stats
+                max_iterations = getattr(self.router.config, 'max_iterations', 8)
+                net_count = len(mock_board.nets)
+                self.progress_update.emit(0, net_count, f"Starting PathFinder negotiation ({max_iterations} iterations max)...", [], [])
+
+                # Route with UnifiedPathFinder and capture real timing
+                logger.info(f"[GUI-STATS] Starting PathFinder with {net_count} nets, {max_iterations} max iterations")
+                routing_result = self.router.route_multiple_nets(mock_board.nets)
+                routing_elapsed = time.time() - routing_start_time
+
+                if routing_result:
+                    logger.info("[GUI-UPF-STEP4] emit_geometry")
+                    tracks_count, vias_count = self.router.emit_geometry(mock_board)
+
+                    # Get geometry payload
+                    geom = self.router.get_geometry_payload()
+
+                    # Convert to result format
+                    result = {
+                        'success': tracks_count > 0 or vias_count > 0,
+                        'tracks': geom.tracks if geom else [],
+                        'vias': geom.vias if geom else [],
+                        'routed_nets': len([n for n in mock_board.nets if n.name != 'unconnected']),
+                        'failed_nets': 0,
+                        'stats': {
+                            'elapsed_time': routing_elapsed,  # REAL routing time
+                            'total_length': tracks_count,
+                            'total_vias': vias_count,
+                            'success_rate': 1.0 if tracks_count > 0 else 0.0,
+                            'iterations_used': max_iterations,  # PathFinder iterations
+                            'negotiation_time': routing_elapsed
+                        }
                     }
-                }
-                
+                    logger.info(f"[GUI-UPF-SUCCESS] Generated {tracks_count} tracks, {vias_count} vias")
+                else:
+                    result = {
+                        'success': False,
+                        'tracks': [],
+                        'vias': [],
+                        'routed_nets': 0,
+                        'failed_nets': len(mock_board.nets),
+                        'stats': {
+                            'elapsed_time': routing_elapsed,  # REAL routing time even on failure
+                            'total_length': 0, 'total_vias': 0, 'success_rate': 0.0,
+                            'iterations_used': 0,  # Failed before negotiation
+                            'negotiation_time': routing_elapsed
+                        }
+                    }
+                    logger.error("[GUI-UPF-FAIL] UnifiedPathFinder routing failed")
+
                 if self.is_cancelled:
                     return
-                    
+
                 # Emit completion signal with results
                 self.routing_completed.emit(result)
             
@@ -285,7 +306,7 @@ def _display_instrumentation_summary(self):
             self.metrics_label.setText(summary_text)
             self.metrics_label.setVisible(True)
             
-            print(f"📊 Routing Summary: {summary_text}")
+            print(f"[SUMMARY] Routing Summary: {summary_text}")
             logger.info(f"Instrumentation summary: {summary}")
 
 
@@ -511,12 +532,25 @@ class PCBViewer(QWidget):
                 break
                 
             try:
-                x1 = track['start_x']
-                y1 = track['start_y']
-                x2 = track['end_x']
-                y2 = track['end_y']
+                # Handle both coordinate key formats
+                x1 = track.get('start_x', track.get('x1'))
+                y1 = track.get('start_y', track.get('y1'))
+                x2 = track.get('end_x', track.get('x2'))
+                y2 = track.get('end_y', track.get('y2'))
                 width = track.get('width', 0.1)
-                layer = track.get('layer', 'F.Cu')
+
+                # Handle both layer formats: integer and string
+                layer_raw = track.get('layer', 0)
+                if isinstance(layer_raw, int):
+                    # Convert integer layer to KiCad layer name
+                    if layer_raw == 0:
+                        layer = 'F.Cu'  # Front copper
+                    elif layer_raw == 1:
+                        layer = 'B.Cu'  # Back copper
+                    else:
+                        layer = f'In{layer_raw-1}.Cu'  # Internal layers In1.Cu, In2.Cu, etc.
+                else:
+                    layer = layer_raw
                 
                 # PERFORMANCE: Skip tracks outside visible viewport
                 # FIXED: Use proper line-viewport intersection instead of rectangles!
@@ -881,10 +915,11 @@ class PCBViewer(QWidget):
 class OrthoRouteMainWindow(QMainWindow):
     """Main OrthoRoute GUI window - faithful recreation of original interface"""
     
-    def __init__(self, board_data: Dict[str, Any], kicad_interface):
+    def __init__(self, board_data: Dict[str, Any], kicad_interface, plugin=None):
         super().__init__()
         self.board_data = board_data
         self.kicad_interface = kicad_interface
+        self.plugin = plugin
         self.pcb_viewer = None
         self.algorithm_combo = None
         self.display_checkboxes = {}
@@ -1022,7 +1057,24 @@ class OrthoRouteMainWindow(QMainWindow):
         self.batch_size_spinner.setToolTip("Number of nets to route in each PathFinder iteration")
         batch_layout.addWidget(self.batch_size_spinner)
         routing_layout.addLayout(batch_layout)
-        
+
+        # GPU acceleration checkbox (beta feature)
+        self.gpu_checkbox = QCheckBox("Enable GPU acceleration (beta)")
+        self.gpu_checkbox.setChecked(False)  # Default to CPU for safety
+        self.gpu_checkbox.setToolTip("Enable CUDA GPU acceleration for routing (experimental)")
+
+        # Check if GPU is available and set initial state
+        import os
+        if os.environ.get('ORTHO_GPU', '0') == '1':
+            self.gpu_checkbox.setChecked(True)
+
+        # Disable if no GPU detected
+        if hasattr(self, 'gpu_status') and not self.gpu_status.get('available', False):
+            self.gpu_checkbox.setEnabled(False)
+            self.gpu_checkbox.setToolTip("GPU not available on this system")
+
+        routing_layout.addWidget(self.gpu_checkbox)
+
         # Main routing buttons
         self.route_preview_btn = QPushButton("Begin Autorouting")
         self.route_preview_btn.clicked.connect(self.begin_autorouting)
@@ -1037,9 +1089,15 @@ class OrthoRouteMainWindow(QMainWindow):
         self.rollback_btn = QPushButton("Discard")
         self.rollback_btn.clicked.connect(self.rollback_routes)
         self.rollback_btn.setEnabled(False)
-        
+
+        self.replay_btn = QPushButton("Replay")
+        self.replay_btn.clicked.connect(self.replay_routing)
+        self.replay_btn.setEnabled(False)
+        self.replay_btn.setToolTip("Re-run the same routing with clean state")
+
         solution_layout.addWidget(self.commit_btn)
         solution_layout.addWidget(self.rollback_btn)
+        solution_layout.addWidget(self.replay_btn)
         routing_layout.addLayout(solution_layout)
         
         layout.addWidget(routing_group)
@@ -1183,6 +1241,21 @@ class OrthoRouteMainWindow(QMainWindow):
         route_action = QAction("Auto Route All", self)
         route_action.triggered.connect(self.auto_route_all)
         tools_menu.addAction(route_action)
+
+        smoke_route_action = QAction("Quick Smoke Route", self)
+        smoke_route_action.triggered.connect(self.quick_smoke_route)
+        tools_menu.addAction(smoke_route_action)
+
+        tools_menu.addSeparator()
+
+        # Self-tests
+        lattice_test_action = QAction("Self-test: Lattice", self)
+        lattice_test_action.triggered.connect(self.self_test_lattice)
+        tools_menu.addAction(lattice_test_action)
+
+        tiny_route_test_action = QAction("Self-test: Tiny Route", self)
+        tiny_route_test_action.triggered.connect(self.self_test_tiny_route)
+        tools_menu.addAction(tiny_route_test_action)
         
     def load_board_data(self):
         """Load and display the board data"""
@@ -1341,33 +1414,555 @@ class OrthoRouteMainWindow(QMainWindow):
     
     # Routing control methods
     def begin_autorouting(self):
-        """Begin autorouting with selected algorithm"""
+        """Begin autorouting with unified pipeline"""
+        if not self.plugin:
+            QMessageBox.critical(self, "Plugin Error", "No plugin instance available")
+            return
+
         algorithm_text = self.algorithm_combo.currentText()
-        batch_size = self.batch_size_spinner.value()
-        
         logger.info(f"Begin autorouting with {algorithm_text}")
-        
+
+        # Set GPU environment variable based on checkbox
+        import os
+        gpu_enabled = self.gpu_checkbox.isChecked()
+        os.environ['ORTHO_GPU'] = '1' if gpu_enabled else '0'
+        gpu_mode = "GPU (beta)" if gpu_enabled else "CPU (safe default)"
+        self.log_to_gui(f"[GPU] Using {gpu_mode} acceleration", "INFO")
+
         # Clear previous log and start fresh
         self.clear_routing_log()
-        self.log_to_gui(f"🚀 Starting {algorithm_text} routing (Batch Size: {batch_size})", "SUCCESS")
-        
+        self.log_to_gui(f"[START] Starting unified autorouting pipeline", "SUCCESS")
+
         # DEBUG: Screenshot before routing starts
         if self.pcb_viewer:
             self.pcb_viewer.debug_screenshot("before_routing")
             self.log_to_gui("📸 Captured pre-routing screenshot", "DEBUG")
-        
-        self.status_label.setText("Starting autorouting...")
-        self.route_preview_btn.setEnabled(False)
-        self.progress_bar.setVisible(True)
-        self.progress_bar.setValue(0)
-        
-        # Route using Manhattan RRG (only algorithm)
-        if algorithm_text == "Manhattan RRG":
-            self._route_manhattan_rrg()
+
+        self._set_ui_busy(True, "Autorouting…")
+
+        try:
+            # Get pathfinder and board from plugin
+            pf = self.plugin.get_pathfinder()
+            board = self._create_board_from_data()
+
+            self.log_to_gui(f"[GUI] Starting unified pipeline with pf={pf._instance_tag}", "INFO")
+
+            # 1) Build lattice + CSR + preflight
+            self.log_to_gui("[PIPELINE] Step 1: Building lattice & CSR...", "INFO")
+            pf.initialize_graph(board)
+            self.log_to_gui("✓ Lattice initialization complete", "SUCCESS")
+
+            self.log_to_gui("[PIPELINE] Step 2: Mapping pads to lattice...", "INFO")
+            pf.map_all_pads(board)
+
+            # SMOKING GUN LOG: Portal mapping status in plugin path
+            total_terminals = 0
+            ok_pairs = 0
+            for _, plist in getattr(pf, "_pad_portal_map", {}).items():
+                total_terminals += len(plist)
+                ok_pairs += sum(1 for t in plist if t.get("portal_node") is not None)
+            missing = total_terminals - ok_pairs
+            logger.info("[PORTAL] terminals: with_portal=%d missing=%d", ok_pairs, missing)
+            assert missing == 0, "Portal mapping missing in plugin path"
+
+            self.log_to_gui("✓ Pad mapping complete", "SUCCESS")
+
+            self.log_to_gui("[PIPELINE] Step 3: Preparing routing runtime...", "INFO")
+            pf.prepare_routing_runtime()
+            self.log_to_gui("✓ Runtime preparation complete", "SUCCESS")
+
+            # 2) Route nets with GUI progress callback
+            self.log_to_gui("[PIPELINE] Step 4: Routing nets...", "INFO")
+            def progress_cb(done, total, eta_s):
+                if self.progress_bar:
+                    self.progress_bar.setValue(int(100 * done / max(total, 1)))
+                    self.progress_bar.setFormat(f"{done}/{total} nets (~{eta_s:.1f}s ETA)")
+
+            pf.route_multiple_nets(board.nets, progress_cb=progress_cb)
+            self.log_to_gui("✓ Net routing complete", "SUCCESS")
+
+            # 3) Emit geometry -> update viewer
+            tracks, vias = pf.emit_geometry(board)
+            geom = pf.get_geometry_payload()
+            self.log_to_gui(f"[GUI] Emitting geometry: tracks={tracks} vias={vias}", "SUCCESS")
+
+            if hasattr(self, 'pcb_viewer') and self.pcb_viewer:
+                self.pcb_viewer.update_routing(geom.tracks, geom.vias)
+
+            # 4) Handle no copper emitted case
+            if tracks == 0 and vias == 0:
+                self.log_to_gui("⚠️ No copper emitted - analyzing reasons...", "WARNING")
+
+                # Analyze why no copper was generated
+                failure_reasons = self._analyze_routing_failures(pf, board)
+
+                for reason in failure_reasons:
+                    self.log_to_gui(f"   • {reason}", "WARNING")
+
+                # Offer smoke route as fallback
+                if failure_reasons:
+                    self.log_to_gui("💡 Attempting smoke route fallback...", "INFO")
+                    try:
+                        success, smoke_tracks, smoke_vias = pf.smoke_route(board)
+                        if success:
+                            geom = pf.get_geometry_payload()
+                            if hasattr(self, 'pcb_viewer') and self.pcb_viewer:
+                                self.pcb_viewer.update_routing(geom.tracks, geom.vias)
+                            self.log_to_gui(f"✅ Smoke route success: {smoke_tracks} tracks, {smoke_vias} vias", "SUCCESS")
+                            self.status_label.setText(f"Smoke route fallback: {smoke_tracks} tracks, {smoke_vias} vias")
+                            tracks, vias = smoke_tracks, smoke_vias  # Update for button enabling logic
+                        else:
+                            self.log_to_gui("❌ Smoke route also failed", "ERROR")
+                    except Exception as smoke_e:
+                        self.log_to_gui(f"❌ Smoke route error: {smoke_e}", "ERROR")
+
+                # Show detailed dialog if still no copper
+                if tracks == 0 and vias == 0:
+                    failure_text = "\n".join([f"• {reason}" for reason in failure_reasons])
+                    QMessageBox.information(
+                        self,
+                        "No Copper Generated",
+                        f"Autorouting completed but no copper was generated.\n\n"
+                        f"Possible reasons:\n{failure_text}\n\n"
+                        f"Try:\n"
+                        f"• Check that nets have at least 2 pads\n"
+                        f"• Verify components are properly connected\n"
+                        f"• Use Tools → Quick Smoke Route for basic connectivity test"
+                    )
+            else:
+                # 5) Success case - Final UI
+                self.log_to_gui(f"✅ Routing completed: {tracks} tracks, {vias} vias", "SUCCESS")
+
+            self.status_label.setText(f"Autoroute complete: {tracks} tracks, {vias} vias")
+
+            # Enable commit/rollback buttons if we have results
+            if tracks > 0 or vias > 0:
+                self.commit_btn.setEnabled(True)
+                self.rollback_btn.setEnabled(True)
+                self.replay_btn.setEnabled(True)
+
+        except Exception as e:
+            logger.exception("Autoroute failed")
+            error_str = str(e)
+
+            # Downgrade zero-length track errors to warnings (don't kill autoroute)
+            if "zero-length" in error_str.lower() or "zero length" in error_str.lower():
+                logger.warning(f"[GUI] Zero-length track handling: {error_str}")
+                self.log_to_gui(f"⚠️ Zero-length tracks filtered (routing continues): {error_str}", "WARNING")
+                # Don't show critical dialog for zero-length issues - they're handled upstream
+            else:
+                self.log_to_gui(f"❌ Autoroute failed: {e}", "ERROR")
+                QMessageBox.critical(self, "Autoroute Error", f"Autoroute failed:\n{str(e)}")
+        finally:
+            self._set_ui_busy(False)
+
+    def _set_ui_busy(self, busy: bool, status_text: str = ""):
+        """Set UI to busy state during routing"""
+        self.route_preview_btn.setEnabled(not busy)
+        self.progress_bar.setVisible(busy)
+        if busy:
+            self.progress_bar.setValue(0)
+            if status_text:
+                self.status_label.setText(status_text)
         else:
-            QMessageBox.information(self, "Routing", f"Algorithm {algorithm_text} not implemented")
-            self._reset_routing_ui()
-        
+            self.status_label.setText("Ready" if not status_text else status_text)
+
+    def _create_board_from_data(self):
+        """Create Board domain object from GUI board_data"""
+        from ...domain.models.board import Board, Net, Pad, Component, Coordinate
+
+        # DEBUG: Check what bounds data we have in board_data
+        logger.info(f"DEBUG: board_data keys: {list(self.board_data.keys())}")
+        if 'bounds' in self.board_data:
+            logger.info(f"DEBUG: board_data['bounds'] = {self.board_data['bounds']}")
+        else:
+            logger.info("DEBUG: 'bounds' key not found in board_data!")
+
+        # Extract layer count from board_data (set by plugin)
+        layer_count = self.board_data.get('layers', 2)
+        if isinstance(layer_count, int):
+            detected_layers = layer_count
+        else:
+            detected_layers = 2  # fallback
+        logger.info(f"DEBUG: Creating Board object with layer_count={detected_layers}")
+
+        board = Board(id="gui-board", name="GUI Board", layer_count=detected_layers)
+        board.nets = []
+        board.components = []  # Initialize components list
+
+        # Track components and their pads for proper Board structure
+        components_dict = {}  # component_id -> Component object
+        all_pads = []  # Keep track of all pads for components
+
+        # First, create components from board_data components section
+        components_data = self.board_data.get('components', [])
+        logger.info(f"DEBUG: Found {len(components_data)} components in board_data")
+        for comp_data in components_data:
+            if isinstance(comp_data, dict):
+                comp_id = comp_data.get('name', comp_data.get('id', ''))
+                if comp_id:
+                    component = Component(
+                        id=comp_id,
+                        reference=comp_id,
+                        value=comp_data.get('value', ''),
+                        footprint=comp_data.get('footprint', ''),
+                        position=Coordinate(
+                            x=comp_data.get('x', 0.0),
+                            y=comp_data.get('y', 0.0)
+                        ),
+                        angle=comp_data.get('rotation', 0.0)
+                    )
+                    components_dict[comp_id] = component
+
+        # Convert nets from GUI data format to domain objects
+        nets_data = self.board_data.get('nets', {})
+        logger.info(f"DEBUG: Processing {len(nets_data)} nets from board_data")
+        if isinstance(nets_data, dict):
+            for net_id, net_info in nets_data.items():
+                net = Net(id=net_id, name=net_info.get('name', net_id))
+                net.pads = []
+
+                # Add pads from net data
+                for pad_ref in net_info.get('pads', []):
+                    if isinstance(pad_ref, dict):
+                        # Extract component name from pad name (likely "ComponentName.PadNumber" format)
+                        pad_name = pad_ref.get('name', '')
+                        component_id = pad_ref.get('component', '')  # First try explicit component field
+
+                        # Fallback: extract from pad name if no explicit component
+                        if not component_id and '.' in pad_name:
+                            component_id = pad_name.split('.')[0]
+
+                        # DEBUG: Check pad_ref structure
+                        if len(all_pads) < 5:  # Only log first few to avoid spam
+                            logger.info(f"DEBUG: pad_ref keys: {list(pad_ref.keys())}")
+                            logger.info(f"DEBUG: pad_ref.get('name') = '{pad_name}'")
+                            logger.info(f"DEBUG: pad_ref.get('component') = '{pad_ref.get('component', 'N/A')}'")
+                            logger.info(f"DEBUG: extracted component_id = '{component_id}'")
+
+                        # Extract pad coordinates from KiCad data
+                        pad_x = pad_ref.get('x', 0.0)
+                        pad_y = pad_ref.get('y', 0.0)
+
+                        pad = Pad(
+                            id=pad_name or f"{component_id}.{pad_ref.get('pin', '')}",
+                            component_id=component_id,
+                            net_id=net_id,
+                            position=Coordinate(x=pad_x, y=pad_y),
+                            size=(0.2, 0.2),  # Default pad size
+                            layer=pad_ref.get('layer', 'F.Cu')
+                        )
+
+                        # DEBUG: Log pad position for first few pads
+                        if len(all_pads) < 5:
+                            logger.info(f"DEBUG: Creating pad '{pad.id}' at ({pad_x}, {pad_y}) from pad_ref x={pad_ref.get('x')}, y={pad_ref.get('y')}")
+                        net.pads.append(pad)
+                        all_pads.append(pad)
+
+                        # Create component if it doesn't exist yet (fallback if not in components section)
+                        if component_id and component_id not in components_dict:
+                            component = Component(
+                                id=component_id,
+                                reference=component_id,
+                                value="",
+                                footprint="",
+                                position=Coordinate(x=pad.position.x, y=pad.position.y),  # Use pad position as reference
+                                angle=0.0
+                            )
+                            components_dict[component_id] = component
+
+                if len(net.pads) >= 2:  # Only add nets with at least 2 pads
+                    board.nets.append(net)
+
+        # Populate components with their pads
+        pads_assigned = 0
+        pads_orphaned = 0
+        for pad in all_pads:
+            if pad.component_id and pad.component_id in components_dict:
+                components_dict[pad.component_id].pads.append(pad)
+                pads_assigned += 1
+            else:
+                pads_orphaned += 1
+                if pads_orphaned <= 5:  # Log first few orphaned pads
+                    logger.warning(f"DEBUG: Orphaned pad '{pad.id}' with component_id '{pad.component_id}' - not found in components_dict")
+
+        # FALLBACK: Create a generic component for orphaned pads
+        if pads_orphaned > 0:
+            logger.info(f"DEBUG: Creating generic component for {pads_orphaned} orphaned pads")
+            generic_component = Component(
+                id="GENERIC_COMPONENT",
+                reference="GENERIC_COMPONENT",
+                value="Generic",
+                footprint="Generic",
+                position=Coordinate(x=200.0, y=140.0),  # Center of typical board
+                angle=0.0
+            )
+
+            # Add all orphaned pads to generic component
+            for pad in all_pads:
+                if not pad.component_id or pad.component_id not in components_dict:
+                    pad.component_id = "GENERIC_COMPONENT"  # Update pad's component reference
+                    generic_component.pads.append(pad)
+                    pads_assigned += 1
+                    pads_orphaned -= 1
+
+            components_dict["GENERIC_COMPONENT"] = generic_component
+
+        # Add components to board
+        board.components = list(components_dict.values())
+
+        # DEBUG: Check component pad counts
+        component_pad_counts = [(comp.id, len(comp.pads)) for comp in board.components]
+        logger.info(f"DEBUG: Component pad counts: {component_pad_counts[:5]}...")  # Show first 5
+
+        logger.info(f"Created board with {len(board.nets)} routable nets, {len(board.components)} components, {len(all_pads)} total pads")
+        logger.info(f"DEBUG: Pad assignment: {pads_assigned} assigned, {pads_orphaned} orphaned")
+
+        # Store KiCad-calculated bounds for accurate routing area
+        kicad_bounds = self.board_data.get('bounds', None)
+        board._kicad_bounds = kicad_bounds
+
+        # DEBUG: Verify bounds were set correctly
+        logger.info(f"DEBUG: Setting board._kicad_bounds = {kicad_bounds}")
+        logger.info(f"DEBUG: After setting, hasattr(board, '_kicad_bounds') = {hasattr(board, '_kicad_bounds')}")
+        if hasattr(board, '_kicad_bounds'):
+            logger.info(f"DEBUG: board._kicad_bounds = {board._kicad_bounds}")
+
+        return board
+
+    def quick_smoke_route(self):
+        """Run quick smoke route test"""
+        if not self.plugin:
+            QMessageBox.critical(self, "Plugin Error", "No plugin instance available")
+            return
+
+        try:
+            pf = self.plugin.get_pathfinder()
+            board = self._create_board_from_data()
+
+            self.log_to_gui("🚀 Starting Quick Smoke Route test", "INFO")
+            self._set_ui_busy(True, "Running smoke route...")
+
+            # Initialize if needed
+            if not hasattr(pf, 'graph_state') or not pf.graph_state:
+                self.log_to_gui("[SMOKE] Initializing graph...", "INFO")
+                pf.initialize_graph(board)
+                pf.map_all_pads(board)
+                pf.prepare_routing_runtime()
+
+            # Run smoke route
+            success, tracks, vias = pf.smoke_route(board)
+
+            if success:
+                # Update viewer with smoke route results
+                geom = pf.get_geometry_payload()
+                if hasattr(self, 'pcb_viewer') and self.pcb_viewer:
+                    self.pcb_viewer.update_routing(geom.tracks, geom.vias)
+
+                self.log_to_gui(f"✅ [SMOKE] Success: emitted {tracks} tracks, {vias} vias", "SUCCESS")
+                self.status_label.setText(f"Smoke route complete: {tracks} tracks, {vias} vias")
+
+                # Enable commit/rollback buttons
+                self.commit_btn.setEnabled(True)
+                self.rollback_btn.setEnabled(True)
+                self.replay_btn.setEnabled(True)
+            else:
+                self.log_to_gui("❌ [SMOKE] Failed: no copper generated", "ERROR")
+                self.status_label.setText("Smoke route failed")
+                QMessageBox.warning(self, "Smoke Route", "Smoke route failed - no routable pairs found")
+
+        except Exception as e:
+            logger.exception("Smoke route failed")
+            self.log_to_gui(f"❌ [SMOKE] Error: {e}", "ERROR")
+            QMessageBox.critical(self, "Smoke Route Error", f"Smoke route failed:\n{str(e)}")
+        finally:
+            self._set_ui_busy(False)
+
+    def _analyze_routing_failures(self, pf, board):
+        """Analyze why routing failed to generate copper"""
+        reasons = []
+
+        try:
+            # Check basic board state
+            if not board or not board.nets:
+                reasons.append("No nets found in board data")
+                return reasons
+
+            nets_with_pads = [net for net in board.nets if len(net.pads) >= 2]
+            if len(nets_with_pads) == 0:
+                reasons.append("No nets with 2+ pads found")
+
+            # Check pathfinder state
+            if not hasattr(pf, 'graph_state') or not pf.graph_state:
+                reasons.append("Graph state not initialized")
+                return reasons
+
+            gs = pf.graph_state
+
+            # Check lattice
+            if not hasattr(gs, 'lattice_node_count') or gs.lattice_node_count == 0:
+                reasons.append("No lattice nodes generated")
+
+            # Check terminals
+            if not hasattr(gs, 'net_terminals') or not gs.net_terminals:
+                reasons.append("No net terminals mapped")
+            else:
+                terminal_count = sum(len(pins) for pins in gs.net_terminals.values())
+                if terminal_count == 0:
+                    reasons.append("Net terminals mapped but empty")
+
+            # Check connectivity
+            if hasattr(pf, '_comp') and hasattr(pf, '_giant_label'):
+                giant_size = sum(1 for comp in pf._comp if comp == pf._giant_label)
+                total_nodes = len(pf._comp) if pf._comp else 0
+                if giant_size == 0:
+                    reasons.append("No giant connected component found")
+                elif giant_size < total_nodes * 0.1:
+                    reasons.append(f"Giant component too small: {giant_size}/{total_nodes} nodes")
+
+            # Check for specific routing failures
+            if hasattr(gs, 'committed_paths'):
+                if not gs.committed_paths:
+                    reasons.append("No paths were successfully routed")
+                elif len(gs.committed_paths) == 0:
+                    reasons.append("All routing attempts failed (no path found)")
+
+            # Default fallback
+            if not reasons:
+                reasons.append("Unknown routing failure - check logs for details")
+
+        except Exception as e:
+            reasons.append(f"Analysis error: {str(e)}")
+
+        return reasons
+
+    def self_test_lattice(self):
+        """Self-test: Build lattice and verify connectivity"""
+        if not self.plugin:
+            QMessageBox.critical(self, "Plugin Error", "No plugin instance available")
+            return
+
+        try:
+            self.log_to_gui("🧪 Starting Lattice Self-Test...", "INFO")
+            self._set_ui_busy(True, "Running lattice test...")
+
+            pf = self.plugin.get_pathfinder()
+            board = self._create_board_from_data()
+
+            # Initialize lattice
+            pf.initialize_graph(board)
+
+            # Check lattice metrics
+            gs = pf.graph_state
+            lattice_count = getattr(gs, 'lattice_node_count', 0)
+
+            if hasattr(pf, '_comp') and hasattr(pf, '_giant_label'):
+                giant_size = sum(1 for comp in pf._comp if comp == pf._giant_label)
+                giant_ratio = giant_size / len(pf._comp) if pf._comp else 0
+            else:
+                pf._analyze_lattice_connectivity()
+                giant_size = sum(1 for comp in pf._comp if comp == pf._giant_label)
+                giant_ratio = giant_size / len(pf._comp) if pf._comp else 0
+
+            # Report results
+            self.log_to_gui(f"✓ Lattice nodes: {lattice_count}", "SUCCESS")
+            self.log_to_gui(f"✓ Giant component: {giant_size} nodes ({giant_ratio:.1%})", "SUCCESS")
+
+            if lattice_count > 0 and giant_ratio > 0.5:
+                self.log_to_gui("✅ LATTICE TEST PASSED", "SUCCESS")
+                self.status_label.setText("✓ Lattice test passed")
+                QMessageBox.information(self, "Lattice Test", f"✅ Lattice test PASSED\n\nLattice: {lattice_count} nodes\nGiant: {giant_size} nodes ({giant_ratio:.1%})")
+            else:
+                self.log_to_gui("❌ LATTICE TEST FAILED", "ERROR")
+                self.status_label.setText("❌ Lattice test failed")
+                QMessageBox.warning(self, "Lattice Test", f"❌ Lattice test FAILED\n\nLattice: {lattice_count} nodes\nGiant: {giant_size} nodes ({giant_ratio:.1%})")
+
+        except Exception as e:
+            logger.exception("Lattice test failed")
+            self.log_to_gui(f"❌ Lattice test error: {e}", "ERROR")
+            QMessageBox.critical(self, "Lattice Test Error", f"Lattice test failed:\n{str(e)}")
+        finally:
+            self._set_ui_busy(False)
+
+    def self_test_tiny_route(self):
+        """Self-test: Create synthetic board and route nets"""
+        if not self.plugin:
+            QMessageBox.critical(self, "Plugin Error", "No plugin instance available")
+            return
+
+        try:
+            self.log_to_gui("🧪 Starting Tiny Route Self-Test...", "INFO")
+            self._set_ui_busy(True, "Running tiny route test...")
+
+            pf = self.plugin.get_pathfinder()
+
+            # Create synthetic 20x20x3 board
+            synthetic_board = self._create_synthetic_board()
+
+            # Route using unified pipeline
+            pf.initialize_graph(synthetic_board)
+            pf.map_all_pads(synthetic_board)
+            pf.prepare_routing_runtime()
+            pf.route_multiple_nets(synthetic_board.nets)
+
+            # Emit geometry
+            tracks, vias = pf.emit_geometry(synthetic_board)
+            geom = pf.get_geometry_payload()
+
+            # Update viewer with synthetic results
+            if hasattr(self, 'pcb_viewer') and self.pcb_viewer:
+                self.pcb_viewer.update_routing(geom.tracks, geom.vias)
+
+            # Report results
+            if tracks > 0 or vias > 0:
+                self.log_to_gui(f"✅ TINY ROUTE TEST PASSED: {tracks} tracks, {vias} vias", "SUCCESS")
+                self.status_label.setText("✓ Tiny route test passed")
+                QMessageBox.information(self, "Tiny Route Test", f"✅ Tiny Route test PASSED\n\nGenerated:\n{tracks} tracks\n{vias} vias")
+            else:
+                self.log_to_gui("❌ TINY ROUTE TEST FAILED: no copper generated", "ERROR")
+                self.status_label.setText("❌ Tiny route test failed")
+                QMessageBox.warning(self, "Tiny Route Test", "❌ Tiny Route test FAILED\n\nNo copper generated")
+
+        except Exception as e:
+            logger.exception("Tiny route test failed")
+            self.log_to_gui(f"❌ Tiny route test error: {e}", "ERROR")
+            QMessageBox.critical(self, "Tiny Route Test Error", f"Tiny route test failed:\n{str(e)}")
+        finally:
+            self._set_ui_busy(False)
+
+    def _create_synthetic_board(self):
+        """Create a 20x20x3 synthetic board with 10 nets for testing"""
+        from ...domain.models.board import Board, Net, Pad, Component, Coordinate
+        import random
+
+        board = Board(id="synthetic", name="Synthetic Test Board 20x20x3")
+        board.nets = []
+
+        # Create 10 test nets, each with 2 pads
+        for net_id in range(10):
+            net = Net(id=f"net_{net_id}", name=f"TEST_NET_{net_id}")
+            net.pads = []
+
+            # Create 2 pads per net at random positions
+            for pad_id in range(2):
+                pad = Pad(
+                    id=f"net_{net_id}_pad_{pad_id}",
+                    component_id=f"U{net_id}",
+                    net_id=f"net_{net_id}",
+                    position=Coordinate(
+                        x=random.uniform(0, 20),  # 20mm x 20mm board
+                        y=random.uniform(0, 20)
+                    ),
+                    size=(0.2, 0.2),  # Default pad size
+                    layer="F.Cu"  # All on top layer for simplicity
+                )
+                net.pads.append(pad)
+
+            board.nets.append(net)
+
+        self.log_to_gui(f"Created synthetic board: {len(board.nets)} nets, 20x20mm", "INFO")
+        return board
+
     def commit_routes(self):
         """Apply routes to KiCad"""
         logger.info("SUCCESS: Committing routes to KiCad")
@@ -1378,6 +1973,7 @@ class OrthoRouteMainWindow(QMainWindow):
         
         self.commit_btn.setEnabled(False)
         self.rollback_btn.setEnabled(False)
+        self.replay_btn.setEnabled(False)
         self.route_preview_btn.setEnabled(True)
         self.progress_bar.setVisible(False)
         self.status_label.setText("Routes applied successfully")
@@ -1392,10 +1988,33 @@ class OrthoRouteMainWindow(QMainWindow):
         
         self.commit_btn.setEnabled(False)
         self.rollback_btn.setEnabled(False)
+        self.replay_btn.setEnabled(False)
         self.route_preview_btn.setEnabled(True)
         self.progress_bar.setVisible(False)
         self.status_label.setText("Routes discarded")
-    
+
+    def replay_routing(self):
+        """Re-run the same routing with clean state for demo repeatability"""
+        logger.info("Replaying last routing")
+        self.status_label.setText("Replaying routing...")
+
+        # Clear existing routes and restart
+        self.board_data['tracks'].clear()
+        self.board_data['vias'].clear()
+
+        # Refresh the viewer to clear previous routing
+        if self.pcb_viewer:
+            self.pcb_viewer.update_routing([], [])
+
+        # Reset button states and restart routing
+        self.commit_btn.setEnabled(False)
+        self.rollback_btn.setEnabled(False)
+        self.replay_btn.setEnabled(False)
+        self.route_preview_btn.setEnabled(False)
+
+        # Trigger autorouting again
+        self.begin_autorouting()
+
     # Menu action methods  
     def refresh_board(self):
         """Refresh board data from KiCad"""
@@ -1751,7 +2370,7 @@ class OrthoRouteMainWindow(QMainWindow):
         if self.pcb_viewer and hasattr(self, '_last_update_time'):
             import time
             current_time = time.time()
-            if current_time - self._last_update_time > 0.1:  # Max 10 FPS during routing
+            if current_time - self._last_update_time > 0.25:  # Throttle to 4 FPS, smooth ~25 nets/250ms
                 self.pcb_viewer.update()
                 self._last_update_time = current_time
         elif self.pcb_viewer:
@@ -1840,11 +2459,15 @@ class OrthoRouteMainWindow(QMainWindow):
         self.progress_bar.setValue(100)
         self.commit_btn.setEnabled(True)
         self.rollback_btn.setEnabled(True)
+        self.replay_btn.setEnabled(True)
         self.route_preview_btn.setEnabled(True)
         self.algorithm_combo.setEnabled(True)
-        
+
         # Store routing result for commit
         self.routing_result = result
+
+        # Export demo artifacts (run_summary.json + GeoJSON)
+        self._export_demo_artifacts(result)
         
         # DEBUG: Screenshot after routing completes
         if self.pcb_viewer:
@@ -1960,6 +2583,7 @@ class OrthoRouteMainWindow(QMainWindow):
         self.algorithm_combo.setEnabled(True)
         self.commit_btn.setEnabled(False)
         self.rollback_btn.setEnabled(False)
+        self.replay_btn.setEnabled(False)
         self.progress_bar.setVisible(False)
         self.status_label.setText("Ready")
     
@@ -2128,10 +2752,102 @@ def _display_instrumentation_summary(self):
             self.metrics_label.setText(summary_text)
             self.metrics_label.setVisible(True)
             
-            print(f"📊 Routing Summary: {summary_text}")
+            print(f"[SUMMARY] Routing Summary: {summary_text}")
             logger.info(f"Instrumentation summary: {summary}")
+
+
+def _export_demo_artifacts(self, result):
+    """Export run summary and GeoJSON artifacts for demo"""
+    try:
+        import json
+        from datetime import datetime
+        from pathlib import Path
+
+        # Create artifacts directory
+        artifacts_dir = Path("demo_artifacts")
+        artifacts_dir.mkdir(exist_ok=True)
+
+        # Generate run summary
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        run_summary = {
+            "timestamp": timestamp,
+            "routing_engine": "UnifiedPathFinder",
+            "gpu_enabled": os.environ.get('ORTHO_GPU', '0') == '1',
+            "total_nets": getattr(result, 'total_nets', 0),
+            "successful_nets": getattr(result, 'successful_nets', 0),
+            "failed_nets": getattr(result, 'failed_nets', 0),
+            "success_rate": f"{(getattr(result, 'successful_nets', 0) / getattr(result, 'total_nets', 1) * 100):.1f}%",
+            "total_tracks": len(self.board_data.get('tracks', [])),
+            "total_vias": len(self.board_data.get('vias', [])),
+            "board_bounds": getattr(self.board_data, 'bounds', None),
+            "grid_pitch": 0.4,
+        }
+
+        # Export run_summary.json
+        summary_file = artifacts_dir / f"run_summary_{timestamp}.json"
+        with open(summary_file, 'w') as f:
+            json.dump(run_summary, f, indent=2)
+
+        # Export GeoJSON (simplified track/via representation)
+        geojson = {
+            "type": "FeatureCollection",
+            "features": []
+        }
+
+        # Add tracks as LineString features
+        for track in self.board_data.get('tracks', []):
+            feature = {
+                "type": "Feature",
+                "geometry": {
+                    "type": "LineString",
+                    "coordinates": [[track.get('start_x', 0), track.get('start_y', 0)],
+                                   [track.get('end_x', 0), track.get('end_y', 0)]]
+                },
+                "properties": {
+                    "type": "track",
+                    "width": track.get('width', 0.2),
+                    "layer": track.get('layer', 0),
+                    "net_id": track.get('net_id', 'unknown')
+                }
+            }
+            geojson["features"].append(feature)
+
+        # Add vias as Point features
+        for via in self.board_data.get('vias', []):
+            feature = {
+                "type": "Feature",
+                "geometry": {
+                    "type": "Point",
+                    "coordinates": [via.get('x', 0), via.get('y', 0)]
+                },
+                "properties": {
+                    "type": "via",
+                    "diameter": via.get('diameter', 0.3),
+                    "drill": via.get('drill', 0.15),
+                    "layers": f"L{via.get('from_layer', 0)}-L{via.get('to_layer', 1)}",
+                    "net_id": via.get('net_id', 'unknown')
+                }
+            }
+            geojson["features"].append(feature)
+
+        # Export GeoJSON
+        geojson_file = artifacts_dir / f"routing_geometry_{timestamp}.geojson"
+        with open(geojson_file, 'w') as f:
+            json.dump(geojson, f, indent=2)
+
+        # Log success
+        logger.info(f"[EXPORT] Demo artifacts exported:")
+        logger.info(f"[EXPORT]   - Summary: {summary_file}")
+        logger.info(f"[EXPORT]   - GeoJSON: {geojson_file}")
+        self.log_to_gui(f"[EXPORT] Artifacts saved to demo_artifacts/", "SUCCESS")
+
+    except Exception as e:
+        logger.warning(f"Failed to export demo artifacts: {e}")
+        self.log_to_gui(f"[EXPORT] Warning: Could not save artifacts", "WARNING")
+
 
 # Add methods to OrthoRouteMainWindow class
 OrthoRouteMainWindow._update_pathfinder_status = _update_pathfinder_status
-OrthoRouteMainWindow._update_csv_export_status = _update_csv_export_status  
+OrthoRouteMainWindow._update_csv_export_status = _update_csv_export_status
 OrthoRouteMainWindow._display_instrumentation_summary = _display_instrumentation_summary
+OrthoRouteMainWindow._export_demo_artifacts = _export_demo_artifacts

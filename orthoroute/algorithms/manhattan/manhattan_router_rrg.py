@@ -39,16 +39,22 @@ class RouteResult:
 class ManhattanRRGRoutingEngine(RoutingEngine):
     """Clean Manhattan routing engine using GPU-accelerated 3D lattice PathFinder"""
     
-    def __init__(self, constraints: DRCConstraints, gpu_provider: Optional[GPUProvider] = None):
-        """Initialize clean GPU-first Manhattan routing engine"""
+    def __init__(self, constraints: DRCConstraints, gpu_provider: Optional[GPUProvider] = None, pathfinder: Optional[UnifiedPathFinder] = None):
+        """Initialize clean GPU-first Manhattan routing engine
+        
+        Args:
+            constraints: DRC constraints
+            gpu_provider: Optional GPU provider
+            pathfinder: Pre-created UnifiedPathFinder instance (recommended to avoid "second instance" bug)
+        """
         super().__init__(constraints)
         
         self.gpu_provider = gpu_provider
         self.board: Optional[Board] = None
         self.progress_callback = None
         
-        # Unified PathFinder
-        self.pathfinder: Optional[UnifiedPathFinder] = None
+        # INSTANCE BUG FIX: Accept pre-created UnifiedPathFinder instance
+        self.pathfinder: Optional[UnifiedPathFinder] = pathfinder
         
         # Results storage
         self.routing_results: Dict[str, RouteResult] = {}
@@ -89,39 +95,43 @@ class ManhattanRRGRoutingEngine(RoutingEngine):
             # Convert domain pads to algorithm pads
             algorithm_board = self._create_algorithm_board(board)
             
-            # Initialize UNIFIED PathFinder (replaces FastLatticeBuilder + GPUPathFinder)
-            logger.info("Initializing Unified High-Performance PathFinder...")
-            
-            # Create optimized PathFinder config from DRC constraints
-            config = PathFinderConfig(
-                initial_pres_fac=0.5,
-                pres_fac_mult=1.3,
-                acc_fac=1.0,
-                max_iterations=6,  # Reduced for speed with adaptive early stopping
-                grid_pitch=0.4,
-                max_search_nodes=30000,  # Optimized limit
-                mode="multi_roi_bidirectional",  # Use Multi-ROI Parallel Bidirectional A* PathFinder
-                roi_parallel=True,  # Enable K concurrent ROI processing
+            # INSTANCE BUG FIX: Use passed-in UnifiedPathFinder instance or create if none provided
+            if self.pathfinder is None:
+                logger.warning("No UnifiedPathFinder instance provided - creating new one (NOT RECOMMENDED)")
+                logger.info("Initializing Unified High-Performance PathFinder...")
                 
-                # Performance & Convergence optimizations
-                delta_multiplier=5.0,  # Start with 5x grid pitch for speed (4x-6x range)
-                adaptive_delta=True,   # Enable adaptive delta tuning
-                congestion_cost_mult=1.3,  # Enhanced congestion penalty (vs default 1.2)
+                # Create optimized PathFinder config from DRC constraints
+                config = PathFinderConfig(
+                    initial_pres_fac=0.5,
+                    pres_fac_mult=1.3,
+                    acc_fac=1.0,
+                    max_iterations=6,  # Reduced for speed with adaptive early stopping
+                    grid_pitch=0.4,
+                    max_search_nodes=30000,  # Optimized limit
+                    mode="multi_roi_bidirectional",  # Use Multi-ROI Parallel Bidirectional A* PathFinder
+                    roi_parallel=True,  # Enable K concurrent ROI processing
+                    
+                    # Performance & Convergence optimizations
+                    delta_multiplier=5.0,  # Start with 5x grid pitch for speed (4x-6x range)
+                    adaptive_delta=True,   # Enable adaptive delta tuning
+                    congestion_cost_mult=1.3,  # Enhanced congestion penalty (vs default 1.2)
+                    
+                    # GPU Kernel & Memory optimizations
+                    enable_memory_compaction=True,  # Compact ROI arrays for coalesced access
+                    memory_alignment=128,           # 128-byte alignment for optimal coalescing
+                    enable_profiling=False,         # Enable for Nsight profiling (set True for analysis)
+                    warp_analysis=False,            # Enable for warp divergence analysis
+                    
+                    # Instrumentation & Logging (enabled by default)
+                    enable_instrumentation=True,   # Enable detailed metrics collection and CSV export
+                    csv_export_path="pathfinder_metrics.csv",
+                    log_iteration_details=True,    # Log detailed iteration metrics
+                    log_roi_statistics=True        # Log ROI batch statistics
+                )
                 
-                # GPU Kernel & Memory optimizations
-                enable_memory_compaction=True,  # Compact ROI arrays for coalesced access
-                memory_alignment=128,           # 128-byte alignment for optimal coalescing
-                enable_profiling=False,         # Enable for Nsight profiling (set True for analysis)
-                warp_analysis=False,            # Enable for warp divergence analysis
-                
-                # Instrumentation & Logging (enabled by default)
-                enable_instrumentation=True,   # Enable detailed metrics collection and CSV export
-                csv_export_path="pathfinder_metrics.csv",
-                log_iteration_details=True,    # Log detailed iteration metrics
-                log_roi_statistics=True        # Log ROI batch statistics
-            )
-            
-            self.pathfinder = UnifiedPathFinder(config=config, use_gpu=True)
+                self.pathfinder = UnifiedPathFinder(config=config, use_gpu=True)
+            else:
+                logger.info(f"Using pre-created UnifiedPathFinder instance: {getattr(self.pathfinder, '_instance_tag', 'NO_TAG')}")
             
             # Build routing lattice (consolidated function)
             if not self.pathfinder.build_routing_lattice(algorithm_board):

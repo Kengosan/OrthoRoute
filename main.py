@@ -17,14 +17,17 @@ if str(package_dir) not in sys.path:
     sys.path.insert(0, str(package_dir))
 
 from orthoroute.shared.configuration import initialize_config, get_config
-from orthoroute.shared.utils.logging_utils import setup_logging
+from orthoroute.shared.utils.logging_utils import setup_logging, init_logging
 
 
 def setup_environment():
     """Setup the application environment."""
+    # Initialize early logging for acceptance test
+    init_logging()
+
     # Initialize configuration
     config = initialize_config()
-    
+
     # Setup logging
     setup_logging(config.get_settings().logging)
     
@@ -110,57 +113,59 @@ def run_test_manhattan():
 
 
 def run_cli(board_file: str, output_dir: str = ".", config_path: Optional[str] = None):
-    """Run command line interface."""
+    """Run command line interface using unified pipeline (same as GUI)."""
     try:
         from orthoroute.infrastructure.kicad.file_parser import KiCadFileParser
-        from orthoroute.application.services.routing_orchestrator import RoutingOrchestrator
-        from orthoroute.infrastructure.gpu.cuda_provider import CUDAProvider
-        from orthoroute.infrastructure.gpu.cpu_fallback import CPUProvider
-        
+        from orthoroute.algorithms.manhattan.unified_pathfinder import UnifiedPathFinder, PathFinderConfig
+
         # Initialize configuration if custom path provided
         if config_path:
             initialize_config(config_path)
-        
+
         config = setup_environment()
-        
-        # Setup services
-        try:
-            gpu_provider = CUDAProvider()
-            logging.info("Using CUDA GPU acceleration")
-        except Exception:
-            gpu_provider = CPUProvider()
-            logging.info("Using CPU fallback")
-        
+
         # Load board
         logging.info(f"Loading board from: {board_file}")
         parser = KiCadFileParser()
         board = parser.load_board(board_file)
-        
+
         if not board:
             logging.error("Failed to load board file")
             sys.exit(1)
-        
+
         logging.info(f"Loaded board: {board.name} with {len(board.nets)} nets")
-        
-        # Setup orchestrator and route
-        orchestrator = RoutingOrchestrator(gpu_provider=gpu_provider)
-        orchestrator.set_board(board)
-        
-        # Route all nets
-        logging.info("Starting routing process...")
-        results = orchestrator.route_all_nets_sync(timeout_per_net=30.0)
-        
-        if results:
-            logging.info(f"Routing completed: {results.routed_nets}/{results.total_nets} nets routed")
-            logging.info(f"Success rate: {results.success_rate:.1%}")
-            
-            # Save results (implementation would depend on desired output format)
-            logging.info(f"Results saved to: {output_dir}")
-            
+
+        # Create UnifiedPathFinder (same as GUI)
+        pf = UnifiedPathFinder(config=PathFinderConfig(), use_gpu=True)
+        logging.info(f"[CLI] Created UnifiedPathFinder with instance_tag={pf._instance_tag}")
+
+        # Use unified pipeline (SAME THREE CALLS AS GUI)
+        logging.info("[CLI] Step 1: Building lattice & CSR...")
+        pf.initialize_graph(board)
+
+        logging.info("[CLI] Step 2: Mapping pads to lattice...")
+        pf.map_all_pads(board)
+
+        logging.info("[CLI] Step 3: Preparing routing runtime...")
+        pf.prepare_routing_runtime()
+
+        logging.info("[CLI] Step 4: Routing nets...")
+        pf.route_multiple_nets(board.nets)
+
+        logging.info("[CLI] Step 5: Emitting geometry...")
+        tracks, vias = pf.emit_geometry(board)
+
+        logging.info(f"[CLI] Routing completed: {tracks} tracks, {vias} vias")
+
+        if tracks > 0 or vias > 0:
+            # Save geometry results
+            geom = pf.get_geometry_payload()
+            logging.info(f"[CLI] Generated {len(geom.tracks)} track objects, {len(geom.vias)} via objects")
+            logging.info(f"[CLI] Results would be saved to: {output_dir}")
         else:
-            logging.error("Routing failed")
+            logging.warning("[CLI] No copper generated")
             sys.exit(1)
-            
+
     except Exception as e:
         logging.error(f"CLI execution failed: {e}")
         sys.exit(1)
@@ -168,13 +173,16 @@ def run_cli(board_file: str, output_dir: str = ".", config_path: Optional[str] =
 
 def main():
     """Main entry point."""
+    import time
+    run_start = time.time()
+
     parser = argparse.ArgumentParser(
         description="OrthoRoute - KiCad PCB Autorouter Plugin",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
   %(prog)s                              # Run KiCad plugin with GUI (default)
-  %(prog)s plugin                       # Run as KiCad plugin with GUI  
+  %(prog)s plugin                       # Run as KiCad plugin with GUI
   %(prog)s plugin --no-gui              # Run as KiCad plugin without GUI
   %(prog)s --test-manhattan             # Run automated Manhattan routing test
   %(prog)s cli board.kicad_pcb          # Route board via CLI
@@ -190,6 +198,10 @@ Examples:
     plugin_parser.add_argument(
         '--no-gui', action='store_true',
         help='Run without GUI (default shows GUI)'
+    )
+    plugin_parser.add_argument(
+        '--min-run-sec', type=int, default=0,
+        help='Keep process alive for at least this many seconds (for CI/agents)'
     )
     
     # CLI mode
@@ -219,37 +231,48 @@ Examples:
         action='store_true',
         help='Run automated Manhattan routing test without GUI'
     )
+    parser.add_argument(
+        '--min-run-sec', type=int, default=0,
+        help='Keep process alive for at least this many seconds (for CI/agents)'
+    )
     
     # Parse arguments
     args = parser.parse_args()
-    
+
+    min_run = int(getattr(args, "min_run_sec", 0) or 0)
+    if min_run > 0:
+        logging.getLogger().info(f"[RUN-MIN] min_run_sec={min_run}")
+
     # Check for test mode first (overrides other modes)
     if getattr(args, 'test_manhattan', False):
         run_test_manhattan()
-        return
-    
-    # Handle no arguments (default to plugin mode)
-    if not args.mode:
-        # Default to plugin mode with GUI
+    elif not args.mode:
+        # Handle no arguments (default to plugin mode)
         run_plugin(show_gui=True)
-        return
-    
-    # Route to appropriate handler
-    try:
-        if args.mode == 'plugin':
-            run_plugin(show_gui=not getattr(args, 'no_gui', False))
-        elif args.mode == 'cli':
-            run_cli(
-                args.board_file, 
-                args.output,
-                getattr(args, 'config', None)
-            )
-        else:
-            parser.error(f"Unknown mode: {args.mode}")
-            
-    except KeyboardInterrupt:
-        logging.info("Operation cancelled by user")
-        sys.exit(130)
+    else:
+        # Route to appropriate handler
+        try:
+            if args.mode == 'plugin':
+                run_plugin(show_gui=not getattr(args, 'no_gui', False))
+            elif args.mode == 'cli':
+                run_cli(
+                    args.board_file,
+                    args.output,
+                    getattr(args, 'config', None)
+                )
+            else:
+                parser.error(f"Unknown mode: {args.mode}")
+
+        except KeyboardInterrupt:
+            logging.info("Operation cancelled by user")
+            sys.exit(130)
+
+    # Keep-alive for headless/short agent runs
+    if min_run > 0:
+        remaining = max(0.0, min_run - (time.time() - run_start))
+        if remaining > 0:
+            logging.getLogger().info(f"[RUN-MIN] Sleeping {remaining:.1f}s to satisfy min runtime")
+            time.sleep(remaining)
 
 
 if __name__ == '__main__':

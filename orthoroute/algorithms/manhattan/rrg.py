@@ -805,3 +805,63 @@ class PathFinderRouter:
             segments.append(segment)
         
         return segments
+
+
+def preflight_graph(graph_state) -> bool:
+    """
+    STEP 4: Preflight validation function for GraphState
+    
+    Validates graph integrity before pad mapping to catch issues early.
+    This is part of the pipeline: lattice + CSR → preflight → pad mapping → routing
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    logger.info(f"[PREFLIGHT] Starting graph validation on graph_state id = {id(graph_state)}...")
+
+    # DEBUG: Show what attributes the graph_state actually has
+    logger.info(f"[PREFLIGHT] DEBUG: graph_state attributes: {dir(graph_state)}")
+    logger.info(f"[PREFLIGHT] DEBUG: hasattr(graph_state, 'indptr'): {hasattr(graph_state, 'indptr')}")
+    if hasattr(graph_state, 'indptr'):
+        logger.info(f"[PREFLIGHT] DEBUG: graph_state.indptr: {graph_state.indptr}")
+        logger.info(f"[PREFLIGHT] DEBUG: graph_state.indptr is None: {graph_state.indptr is None}")
+        if graph_state.indptr is not None:
+            logger.info(f"[PREFLIGHT] DEBUG: graph_state.indptr type: {type(graph_state.indptr)}")
+
+    # Basic validation - check if we have required arrays
+    if not hasattr(graph_state, 'indptr') or graph_state.indptr is None:
+        logger.error("[PREFLIGHT] FAILED: Missing indptr array")
+        return False
+        
+    if not hasattr(graph_state, 'indices') or graph_state.indices is None:
+        logger.error("[PREFLIGHT] FAILED: Missing indices array")
+        return False
+        
+    if not hasattr(graph_state, 'weights') or graph_state.weights is None:
+        logger.error("[PREFLIGHT] FAILED: Missing weights array")
+        return False
+    
+    # Check array sizes match
+    if len(graph_state.indices) != len(graph_state.weights):
+        logger.error(f"[PREFLIGHT] FAILED: indices({len(graph_state.indices)}) != weights({len(graph_state.weights)})")
+        return False
+    
+    # Check indptr bounds
+    if len(graph_state.indptr) == 0:
+        logger.error("[PREFLIGHT] FAILED: Empty indptr array")
+        return False
+        
+    # Log basic stats
+    num_nodes = len(graph_state.indptr) - 1 if len(graph_state.indptr) > 0 else 0
+    num_edges = len(graph_state.indices)
+    
+    logger.info(f"[PREFLIGHT] Graph has {num_nodes} nodes, {num_edges} edges")
+    logger.info(f"[PREFLIGHT] indptr[0]={graph_state.indptr[0]}, indptr[-1]={graph_state.indptr[-1]}")
+    
+    # Validate indptr bounds
+    if graph_state.indptr[-1] != num_edges:
+        logger.error(f"[PREFLIGHT] FAILED: indptr[-1]={graph_state.indptr[-1]} != num_edges={num_edges}")
+        return False
+    
+    logger.info("[PREFLIGHT] All basic validations passed")
+    return True

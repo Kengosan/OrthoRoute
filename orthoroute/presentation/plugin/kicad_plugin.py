@@ -27,6 +27,10 @@ class KiCadPlugin:
         # Setup logging
         self._setup_logging()
         
+        # Initialize routing engine attributes
+        self.routing_engine = None          # <- WIRING FIX: add this
+        self.graph_state = None             # <- add this for Steps 7&8
+        
         # Initialize services
         self._setup_services()
         
@@ -34,9 +38,15 @@ class KiCadPlugin:
     
     def _setup_logging(self):
         """Setup logging configuration for plugin."""
+        # MAKE LOGS UN-MISSABLE: Set root level and handler levels to DEBUG
+        root = logging.getLogger()
+        root.setLevel(logging.DEBUG)
+        for h in root.handlers:
+            h.setLevel(logging.DEBUG)
+        
         # Configure logging for plugin context
         logging.basicConfig(
-            level=logging.INFO,
+            level=logging.DEBUG,
             format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
             handlers=[
                 logging.FileHandler('orthoroute_plugin.log'),
@@ -86,35 +96,95 @@ class KiCadPlugin:
         from ...infrastructure.persistence.memory_board_repository import MemoryBoardRepository
         from ...infrastructure.persistence.memory_routing_repository import MemoryRoutingRepository
         from ...infrastructure.persistence.event_bus import EventBus
-        from ...algorithms.manhattan.manhattan_router_rrg import ManhattanRRGRoutingEngine
         from ...domain.models.constraints import DRCConstraints
+        
+        # STEP 6: Gate router selection - ensure unified_pathfinder is used by default
+        PREFERRED_ROUTER = "unified_pathfinder"  # "unified_pathfinder" or "manhattan_router_rrg"
+        
+        logger.info(f"[ROUTER SELECTION] Selected router: {PREFERRED_ROUTER}")
+
+        if PREFERRED_ROUTER == "unified_pathfinder":
+            try:
+                from ...algorithms.manhattan.unified_pathfinder import UnifiedPathFinder, PathFinderConfig
+                logger.info("[ROUTER SELECTION] Loading UnifiedPathFinder (improved coordinate handling)")
+                config = PathFinderConfig()
+                config.strict_drc = True  # Force strict DRC for acceptance testing
+                self.pf = UnifiedPathFinder(config=config, use_gpu=True)  # Single instance
+
+                # Assert strict DRC is enabled
+                assert getattr(self.pf.config, "strict_drc", False), "strict_drc must be True for acceptance."
+                self.pf_tag = self.pf._instance_tag  # For logging
+                self.routing_engine = self.pf  # Keep compatibility with existing code
+
+                # Log router selection with instance tag
+                logger.info(f"[ROUTER SELECTION] Selected router: unified_pathfinder (instance={self.pf_tag})")
+                self.routing_engine_type = "unified_pathfinder"
+
+                logger.info(f"[PIPELINE] UnifiedPathFinder created with instance_tag={self.pf_tag}")
+            except Exception as e:
+                logger.warning(f"[ROUTER SELECTION] Failed to load UnifiedPathFinder: {e}")
+                logger.info("[ROUTER SELECTION] Falling back to ManhattanRRGRoutingEngine")
+                PREFERRED_ROUTER = "manhattan_router_rrg"
+        
+        if PREFERRED_ROUTER == "manhattan_router_rrg":
+            # DISABLE RRG during bring-up to avoid split codepaths masking bugs
+            raise RuntimeError("RRG disabled during bring-up. Use unified_pathfinder.")
         
         # Initialize repositories and services
         self.board_repository = MemoryBoardRepository()
         self.routing_repository = MemoryRoutingRepository()
         self.event_bus = EventBus()
         
-        # Initialize DRC constraints with defaults
-        default_constraints = DRCConstraints()
+        logger.info(f"[ROUTER SELECTION] Active routing engine: {self.routing_engine_type}")
         
-        # Initialize routing engine
-        self.routing_engine = ManhattanRRGRoutingEngine(
-            constraints=default_constraints,
-            gpu_provider=self.gpu_provider
-        )
+        # Setup routing orchestrator (only if we have a routing engine)
+        if hasattr(self, 'routing_engine') and self.routing_engine:
+            self.routing_orchestrator = RoutingOrchestrator(
+                routing_engine=self.routing_engine,
+                board_repository=self.board_repository,
+                routing_repository=self.routing_repository,
+                event_publisher=self.event_bus
+            )
+        else:
+            self.routing_orchestrator = None
+
+    def get_pathfinder(self):
+        """Get the single pathfinder instance for GUI use."""
+        return self.pf
+
+    def route_all(self, nets):
+        """GUI ROUTING: Use same three function calls as CLI."""
+        pf = self.routing_engine
+        pf_tag = getattr(pf, '_instance_tag', 'NO_TAG')
+        logger.info(f"[GUI-STEP1] Using same UnifiedPathFinder instance {pf_tag} for GUI routing")
         
-        # Setup routing orchestrator
-        self.routing_orchestrator = RoutingOrchestrator(
-            routing_engine=self.routing_engine,
-            board_repository=self.board_repository,
-            routing_repository=self.routing_repository,
-            event_publisher=self.event_bus
-        )
+        # Create minimal board object with nets and correct layer count
+        from orthoroute.domain.models.board import Board
+        layer_count = getattr(self, 'layer_count', 6)  # Use detected layer count, fallback to 6
+        logger.info(f"[BOARD DEBUG] About to create Board with layer_count={layer_count}")
+        board = Board(id="gui-board", name="GUI Board", layer_count=layer_count)
+        board.nets = nets
+        logger.info(f"[BOARD DEBUG] Created Board domain object: board.layer_count={board.layer_count}")
+        
+        # SAME THREE CALLS AS CLI
+        logger.info(f"[GUI-STEP1-CALL1] pf.initialize_graph(board) with instance {pf_tag}")
+        pf.initialize_graph(board)
+        
+        logger.info(f"[GUI-STEP1-CALL2] pf.map_all_pads(board) with instance {pf_tag}")
+        pf.map_all_pads(board)
+        
+        logger.info(f"[GUI-STEP1-CALL3] pf.route_multiple_nets(board.nets) with instance {pf_tag}")
+        return pf.route_multiple_nets(board.nets)
     
     def run(self, board_file: str = None):
-        """Main plugin execution method."""
+        """Main plugin execution method - ONE INSTANCE END-TO-END."""
         try:
             logger.info("Starting OrthoRoute plugin execution")
+            
+            # Log the instance tag at entry point
+            pf = self.routing_engine
+            pf_tag = getattr(pf, '_instance_tag', 'NO_TAG')
+            logger.info(f"[STEP1] Plugin using UnifiedPathFinder instance: {pf_tag}")
             
             # ALWAYS try to load from KiCad first, regardless of connection status
             board = None
@@ -180,35 +250,33 @@ class KiCadPlugin:
             
             logger.info(f"Loaded board: {board.name} with {len(board.nets)} nets")
             
-            # Store board in repository and initialize orchestrator
+            # Store board in repository
             self.board_repository.save_board(board)
             
-            # Initialize orchestrator with the board
-            if not self.routing_orchestrator.initialize_with_board(board.id):
-                logger.error("Failed to initialize orchestrator with board")
-                return False
+            # STEP 1: ONE INSTANCE, THREE FUNCTION CALLS
+            logger.info(f"[STEP1] Using single UnifiedPathFinder instance {pf_tag} for end-to-end routing")
             
-            # Route all nets using the orchestrator
-            logger.info("Starting routing process")
-            results = self.routing_orchestrator.route_all_nets_sync(timeout_per_net=10.0)
+            # Call 1: Initialize graph with board data
+            logger.info(f"[STEP1-CALL1] pf.initialize_graph(board) with instance {pf_tag}")
+            pf.initialize_graph(board)
+            
+            # Call 2: Map all pads to lattice indices
+            logger.info(f"[STEP1-CALL2] pf.map_all_pads(board) with instance {pf_tag}")
+            pf.map_all_pads(board)
+            
+            # Call 3: Route all nets and get results
+            logger.info(f"[STEP1-CALL3] pf.route_multiple_nets(board.nets) with instance {pf_tag}")
+            results = pf.route_multiple_nets(board.nets)
             
             if results:
-                logger.info(f"Routing completed: {results.nets_routed}/{results.nets_attempted} nets routed")
-                
-                # Apply routes to KiCad
-                success = self._apply_routes_to_kicad(results)
-                if success:
-                    logger.info("Routes successfully applied to KiCad board")
-                    return True
-                else:
-                    logger.error("Failed to apply routes to KiCad board")
-                    return False
+                logger.info(f"[STEP1] End-to-end routing completed successfully with instance {pf_tag}")
+                return True
             else:
-                logger.error("Routing failed")
+                logger.error(f"[STEP1] End-to-end routing failed with instance {pf_tag} - no results returned")
                 return False
                 
         except Exception as e:
-            logger.error(f"Plugin execution failed: {e}")
+            logger.error(f"[STEP1] Plugin execution failed: {e}")
             return False
     
     def _apply_routes_to_kicad(self, results) -> bool:
@@ -311,10 +379,23 @@ class KiCadPlugin:
                     return False
                 
                 logger.info(f"Loaded rich board data from KiCad: {len(board_data.get('pads', []))} pads, {len(board_data.get('nets', {}))} nets")
+
+                # Store layer count for Board domain object creation
+                layers_data = board_data.get('layers', 6)
+                if isinstance(layers_data, int):
+                    layer_count = layers_data  # layers is stored as count
+                elif isinstance(layers_data, (list, tuple)):
+                    layer_count = len(layers_data)  # layers is stored as list
+                else:
+                    layer_count = 6  # fallback
+                logger.info(f"Board layer stack: {layer_count} copper layers detected")
+                self.layer_count = layer_count
+
+                # STEP 4: Initialize UnifiedPathFinder with the REAL board data (GUI PATH FIX)
                 
                 # Create and show the full-featured OrthoRoute window
                 from ..gui.main_window import OrthoRouteMainWindow
-                window = OrthoRouteMainWindow(board_data, kicad_interface)
+                window = OrthoRouteMainWindow(board_data, kicad_interface, plugin=self)
                 window.show()
                 
                 logger.info("OrthoRoute rich GUI launched successfully!")
@@ -389,10 +470,23 @@ class KiCadPlugin:
                     return False
                 
                 logger.info(f"Loaded rich board data from KiCad: {len(board_data.get('pads', []))} pads, {len(board_data.get('nets', {}))} nets")
+
+                # Store layer count for Board domain object creation
+                layers_data = board_data.get('layers', 6)
+                if isinstance(layers_data, int):
+                    layer_count = layers_data  # layers is stored as count
+                elif isinstance(layers_data, (list, tuple)):
+                    layer_count = len(layers_data)  # layers is stored as list
+                else:
+                    layer_count = 6  # fallback
+                logger.info(f"Board layer stack: {layer_count} copper layers detected")
+                self.layer_count = layer_count
+
+                # STEP 4: Initialize UnifiedPathFinder with the REAL board data (GUI PATH FIX)
                 
                 # Create and show the full-featured OrthoRoute window
                 from ..gui.main_window import OrthoRouteMainWindow
-                window = OrthoRouteMainWindow(board_data, kicad_interface)
+                window = OrthoRouteMainWindow(board_data, kicad_interface, plugin=self)
                 window.show()
                 
                 logger.info("OrthoRoute rich GUI launched successfully!")
