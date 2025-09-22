@@ -544,8 +544,28 @@ class RichKiCadInterface:
 
     def _get_layer_count(self, board) -> int:
         """Get the number of copper layers using KiCad API with multiple detection methods"""
-        
-        # Method 1: Use proper IPC API for copper layer count
+
+        # Method 1: Use BoardStackup layers API (most accurate)
+        try:
+            stackup = _ipc_retry(board.get_stackup, "get_stackup", max_retries=3, sleep_s=0.5)
+            if stackup and hasattr(stackup, 'layers'):
+                copper_layers = []
+                for layer in stackup.layers:
+                    # Check if layer is copper type
+                    if hasattr(layer, 'type') and 'copper' in str(layer.type).lower():
+                        copper_layers.append(layer)
+                    elif hasattr(layer, 'name') and 'Cu' in str(layer.name):
+                        copper_layers.append(layer)
+
+                if copper_layers:
+                    layer_count = len(copper_layers)
+                    logger.info(f"Got layer count from BoardStackup: {layer_count} copper layers")
+                    logger.info(f"Stackup copper layers: {[str(getattr(l, 'name', f'Layer{i}')) for i, l in enumerate(copper_layers)]}")
+                    return layer_count
+        except Exception as e:
+            logger.warning(f"BoardStackup layer detection failed: {e}")
+
+        # Method 2: Use direct IPC API for copper layer count
         try:
             layer_count = _ipc_retry(board.get_copper_layer_count, "get_copper_layer_count", max_retries=3, sleep_s=0.5)
             if layer_count and layer_count > 0:

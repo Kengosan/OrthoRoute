@@ -25,7 +25,7 @@ from PyQt6.QtWidgets import (
     QSplitter, QGroupBox, QScrollArea, QTabWidget, QProgressBar,
     QStatusBar, QMenuBar, QToolBar, QApplication, QMessageBox,
     QCheckBox, QSpinBox, QDoubleSpinBox, QComboBox, QSlider,
-    QFrame, QSizePolicy
+    QFrame, QSizePolicy, QLineEdit
 )
 from PyQt6.QtCore import (
     Qt, QTimer, QThread, pyqtSignal, QSize, QRect, QPoint, QPointF,
@@ -88,7 +88,7 @@ class RoutingThread(QThread):
                     pf_config.strict_drc = True
 
                     # Create UnifiedPathFinder instance (not legacy ManhattanRRG)
-                    self.router = UnifiedPathFinder(config=pf_config, use_gpu=True)
+                    self.router = UnifiedPathFinder(config=pf_config, use_gpu=False)  # FORCE CPU-ONLY
                     logger.info(f"[GUI-ROUTER-WIRE] Created new {self.router.__class__.__name__} with instance_tag={getattr(self.router, '_instance_tag', 'NO_TAG')}")
 
                 # STEP 1c: Add guard assert to prove UnifiedPathFinder is used
@@ -394,6 +394,12 @@ class PCBViewer(QWidget):
         painter.translate(self.width() / 2, self.height() / 2)
         painter.scale(self.zoom_factor, self.zoom_factor)
         painter.translate(-self.pan_x, -self.pan_y)
+
+        # Center the board in the viewport
+        bounds = self.board_data.get('bounds', (0, 0, 100, 100))
+        board_center_x = (bounds[0] + bounds[2]) / 2
+        board_center_y = (bounds[1] + bounds[3]) / 2
+        painter.translate(-board_center_x, -board_center_y)
         
         # Skip artificial board outline - real boards should use Edge.Cuts layer
         # self._draw_board_outline(painter)
@@ -494,7 +500,7 @@ class PCBViewer(QWidget):
         logger.info(f"_draw_tracks called: board_data has {len(tracks)} tracks")
         if tracks:
             logger.info(f"First track: {tracks[0]}")
-        
+
         if not tracks:
             logger.info("No tracks to draw - returning early")
             return
@@ -507,37 +513,64 @@ class PCBViewer(QWidget):
             transform = painter.transform().inverted()[0]
             viewport_rect = painter.viewport()
             visible_rect = transform.mapRect(QRectF(viewport_rect))
-            
+
             # Expand visible rect slightly for smooth panning
             margin = max(visible_rect.width(), visible_rect.height()) * 0.1
             visible_rect = visible_rect.adjusted(-margin, -margin, margin, margin)
-        except:
+
+            logger.info(f"VIEWPORT DEBUG: visible_rect = ({visible_rect.left():.1f}, {visible_rect.top():.1f}) -> ({visible_rect.right():.1f}, {visible_rect.bottom():.1f})")
+            logger.info(f"VIEWPORT DEBUG: zoom_level = {zoom_level:.3f}")
+        except Exception as e:
             # Fallback: render everything if transform fails
+            logger.warning(f"VIEWPORT DEBUG: Transform failed ({e}), using fallback viewport")
             visible_rect = QRectF(-1000, -1000, 2000, 2000)
         
-        # Performance limits based on zoom level - ALWAYS SHOW TRACKS/VIAS
-        if zoom_level < 0.05:
-            max_tracks = 5000    # Very zoomed out - still show many tracks
-            min_width = 0.0001   # Always show 3 mil (0.0762mm) tracks  
-        elif zoom_level < 1.0:
-            max_tracks = 10000   # Moderately zoomed out - show more tracks
-            min_width = 0.0001   # Always show 3 mil traces
-        else:
-            max_tracks = 20000   # Zoomed in - show all tracks
-            min_width = 0.0001   # Always show all traces
-        
+        # Smart viewport culling for performance with large track counts
+        max_tracks_per_frame = 50000  # Reasonable limit per frame
+        min_width = 0.0001
+
         drawn_tracks = 0
+        culled_tracks = 0
+
         for track in tracks:
-            if drawn_tracks >= max_tracks:
-                break
+            if drawn_tracks >= max_tracks_per_frame:
+                culled_tracks += 1
+                continue
                 
             try:
-                # Handle both coordinate key formats
-                x1 = track.get('start_x', track.get('x1'))
-                y1 = track.get('start_y', track.get('y1'))
-                x2 = track.get('end_x', track.get('x2'))
-                y2 = track.get('end_y', track.get('y2'))
+                # Handle both coordinate key formats - updated for new track structure
+                if 'start' in track and 'end' in track:
+                    x1, y1 = track['start']
+                    x2, y2 = track['end']
+                else:
+                    x1 = track.get('start_x', track.get('x1'))
+                    y1 = track.get('start_y', track.get('y1'))
+                    x2 = track.get('end_x', track.get('x2'))
+                    y2 = track.get('end_y', track.get('y2'))
+
                 width = track.get('width', 0.1)
+
+                # Viewport culling - only draw tracks that intersect with visible area
+                track_rect = QRectF(min(x1, x2), min(y1, y2), abs(x2 - x1), abs(y2 - y1))
+                if not visible_rect.intersects(track_rect.adjusted(-1, -1, 1, 1)):  # Small margin for line width
+                    culled_tracks += 1
+                    continue
+
+                # DEBUG: Check for None coordinates
+                if any(coord is None for coord in [x1, y1, x2, y2]):
+                    logger.warning(f"TRACK SKIPPED: None coordinates in {track}")
+                    continue
+
+                # DEBUG: Log coordinate verification for first track
+                if drawn_tracks == 0:
+                    bounds = self.board_data.get('bounds', None)
+                    if bounds:
+                        board_min_x, board_max_x = bounds[0], bounds[2]
+                        board_min_y, board_max_y = bounds[1], bounds[3]
+                        in_bounds_x = board_min_x <= x1 <= board_max_x and board_min_x <= x2 <= board_max_x
+                        in_bounds_y = board_min_y <= y1 <= board_max_y and board_min_y <= y2 <= board_max_y
+                        logger.info(f"COORD VERIFY: Track ({x1:.1f},{y1:.1f})->({x2:.1f},{y2:.1f}) in_bounds=({in_bounds_x},{in_bounds_y})")
+                        logger.info(f"COORD VERIFY: Board bounds ({board_min_x:.1f},{board_min_y:.1f})->({board_max_x:.1f},{board_max_y:.1f})")
 
                 # Handle both layer formats: integer and string
                 layer_raw = track.get('layer', 0)
@@ -552,22 +585,27 @@ class PCBViewer(QWidget):
                 else:
                     layer = layer_raw
                 
+                # TEMPORARY: Disable viewport culling to debug coordinate system
                 # PERFORMANCE: Skip tracks outside visible viewport
                 # FIXED: Use proper line-viewport intersection instead of rectangles!
                 line_start = QPointF(x1, y1)
                 line_end = QPointF(x2, y2)
-                
-                # Check if either endpoint is in viewport, or line crosses viewport
-                if (visible_rect.contains(line_start) or 
-                    visible_rect.contains(line_end) or
-                    self._line_intersects_rect(x1, y1, x2, y2, visible_rect)):
-                    # Line is visible, continue to draw
-                    pass
-                else:
-                    # Log why tracks are being culled for first few tracks
-                    if drawn_tracks < 3:
-                        logger.info(f"TRACK CULLED #{drawn_tracks+1}: track ({x1:.1f},{y1:.1f})->({x2:.1f},{y2:.1f}) outside viewport ({visible_rect.left():.1f},{visible_rect.top():.1f})->({visible_rect.right():.1f},{visible_rect.bottom():.1f})")
-                    continue
+
+                # DEBUG: Log first few tracks to see coordinate ranges
+                if drawn_tracks < 5:
+                    logger.info(f"TRACK COORDS #{drawn_tracks+1}: ({x1:.1f},{y1:.1f})->({x2:.1f},{y2:.1f}) layer={layer}")
+
+                # DISABLED: Skip viewport culling for now
+                # if (visible_rect.contains(line_start) or
+                #     visible_rect.contains(line_end) or
+                #     self._line_intersects_rect(x1, y1, x2, y2, visible_rect)):
+                #     # Line is visible, continue to draw
+                #     pass
+                # else:
+                #     # Log why tracks are being culled for first few tracks
+                #     if drawn_tracks < 3:
+                #         logger.info(f"TRACK CULLED #{drawn_tracks+1}: track ({x1:.1f},{y1:.1f})->({x2:.1f},{y2:.1f}) outside viewport ({visible_rect.left():.1f},{visible_rect.top():.1f})->({visible_rect.right():.1f},{visible_rect.bottom():.1f})")
+                #     continue
                     
                 # ALWAYS SHOW TRACKS - No width threshold for production visibility
                 # User requirement: tracks/vias visible at every zoom level
@@ -611,7 +649,7 @@ class PCBViewer(QWidget):
             except (KeyError, TypeError):
                 continue
         
-        logger.info(f"_draw_tracks completed: drew {drawn_tracks} tracks out of {len(tracks)} available")
+        logger.info(f"_draw_tracks completed: drew {drawn_tracks} tracks, culled {culled_tracks} (viewport + limit), total {len(tracks)} available")
                 
     def _line_intersects_rect(self, x1, y1, x2, y2, rect):
         """Check if a line intersects with a rectangle (simple bounding box check)"""
@@ -762,9 +800,12 @@ class PCBViewer(QWidget):
     def _draw_vias(self, painter: QPainter):
         """Draw vias with proper coloring and visibility control"""
         vias = self.board_data.get('vias', [])
-        
+
         if not vias:
+            logger.info("_draw_vias: No vias to draw")
             return  # No vias to draw
+
+        logger.info(f"_draw_vias called: board_data has {len(vias)} vias")
             
         # Get zoom level for LOD optimization
         zoom_level = painter.transform().m11()
@@ -782,10 +823,15 @@ class PCBViewer(QWidget):
             visible_rect = QRectF(-1000, -1000, 2000, 2000)  # Large fallback area
         
         # Draw vias
+        drawn_vias = 0
         for via in vias:
             try:
-                x = via['x']
-                y = via['y']
+                # Handle both coordinate formats
+                if 'position' in via:
+                    x, y = via['position']
+                else:
+                    x = via['x']
+                    y = via['y']
                 
                 # Skip if outside visible area
                 if not visible_rect.contains(QPointF(x, y)):
@@ -838,9 +884,14 @@ class PCBViewer(QWidget):
                                           indicator_size*2, indicator_size*2),
                                    Qt.AlignmentFlag.AlignCenter, 
                                    f"{start_layer[0]}-{end_layer[0]}")
-                
-            except (KeyError, TypeError):
+
+                drawn_vias += 1
+
+            except (KeyError, TypeError) as e:
+                logger.warning(f"Invalid via data: {via}, error: {e}")
                 continue
+
+        logger.info(f"_draw_vias completed: drew {drawn_vias} vias out of {len(vias)} available")
                 
     def wheelEvent(self, event: QWheelEvent):
         """Handle mouse wheel for zooming"""
@@ -1101,7 +1152,40 @@ class OrthoRouteMainWindow(QMainWindow):
         routing_layout.addLayout(solution_layout)
         
         layout.addWidget(routing_group)
-        
+
+        # Debug controls group
+        debug_group = QGroupBox("Debug Controls")
+        debug_layout = QVBoxLayout(debug_group)
+
+        # Focus net debugging
+        focus_net_layout = QHBoxLayout()
+        focus_net_layout.addWidget(QLabel("Focus Net:"))
+        self.focus_net_input = QLineEdit()
+        self.focus_net_input.setPlaceholderText("e.g. B06B14_000")
+        self.focus_net_input.returnPressed.connect(self.focus_on_net)
+        focus_net_layout.addWidget(self.focus_net_input)
+
+        self.focus_net_btn = QPushButton("Highlight")
+        self.focus_net_btn.clicked.connect(self.focus_on_net)
+        focus_net_layout.addWidget(self.focus_net_btn)
+        debug_layout.addLayout(focus_net_layout)
+
+        # Show pad stubs toggle - check environment variable
+        import os
+        show_stubs_default = os.getenv("ORTHO_SHOW_PORTALS", "1").lower() in ("1", "true", "yes")
+        self.show_pad_stubs_checkbox = QCheckBox("Show pad stubs")
+        self.show_pad_stubs_checkbox.setChecked(show_stubs_default)
+        self.show_pad_stubs_checkbox.toggled.connect(self.toggle_pad_stubs)
+        debug_layout.addWidget(self.show_pad_stubs_checkbox)
+
+        # Portal visualization for first 50 nets
+        self.show_portal_dots_checkbox = QCheckBox("Show portal dots (first 50 nets)")
+        self.show_portal_dots_checkbox.setChecked(False)
+        self.show_portal_dots_checkbox.toggled.connect(self.toggle_portal_dots)
+        debug_layout.addWidget(self.show_portal_dots_checkbox)
+
+        layout.addWidget(debug_group)
+
         # Nets statistics group
         nets_stats_group = QGroupBox("Nets Statistics")
         nets_stats_layout = QVBoxLayout(nets_stats_group)
@@ -1411,7 +1495,61 @@ class OrthoRouteMainWindow(QMainWindow):
             else:
                 self.pcb_viewer.visible_layers.discard(layer)
             self.pcb_viewer.update()
-    
+
+    def focus_on_net(self):
+        """Focus on specific net for debugging"""
+        net_id = self.focus_net_input.text().strip()
+        if not net_id:
+            return
+
+        logger.info(f"[GUI-DEBUG] Focusing on net: {net_id}")
+
+        # Update PCB viewer to highlight the focused net
+        if self.pcb_viewer:
+            # Set focused net in viewer
+            self.pcb_viewer.focused_net = net_id
+
+            # Clear previous highlights and highlight this net
+            if hasattr(self.pcb_viewer, 'highlight_net'):
+                self.pcb_viewer.highlight_net(net_id)
+                self.pcb_viewer.update()
+
+            # Log debug info about this net if available
+            if hasattr(self.pcb_viewer, 'board_data') and self.pcb_viewer.board_data:
+                # Look for tracks for this net
+                tracks_for_net = []
+                if 'tracks' in self.pcb_viewer.board_data:
+                    tracks_for_net = [t for t in self.pcb_viewer.board_data['tracks'] if t.get('net_id') == net_id]
+
+                # Look for stubs for this net
+                stubs_for_net = []
+                if hasattr(self.pcb_viewer, 'stub_tracks'):
+                    stubs_for_net = [s for s in self.pcb_viewer.stub_tracks if s.get('net_id') == net_id]
+
+                logger.info(f"[GUI-DEBUG] Net {net_id}: {len(tracks_for_net)} tracks, {len(stubs_for_net)} stubs")
+
+                # Log first few track coordinates for debugging
+                for i, track in enumerate(tracks_for_net[:3]):
+                    logger.info(f"[GUI-DEBUG] Track {i}: start={track.get('start')}, end={track.get('end')}, layer={track.get('layer')}")
+
+    def toggle_pad_stubs(self, checked: bool):
+        """Toggle visibility of pad connection stubs"""
+        logger.info(f"[GUI-DEBUG] Pad stubs: {'visible' if checked else 'hidden'}")
+
+        # Update PCB viewer stub visibility
+        if self.pcb_viewer:
+            self.pcb_viewer.show_pad_stubs = checked
+            self.pcb_viewer.update()
+
+    def toggle_portal_dots(self, checked: bool):
+        """Toggle visibility of portal dots for first 50 nets"""
+        logger.info(f"[GUI-DEBUG] Portal dots: {'visible' if checked else 'hidden'}")
+
+        # Update PCB viewer portal visualization
+        if self.pcb_viewer:
+            self.pcb_viewer.show_portal_dots = checked
+            self.pcb_viewer.update()
+
     # Routing control methods
     def begin_autorouting(self):
         """Begin autorouting with unified pipeline"""
@@ -1473,10 +1611,23 @@ class OrthoRouteMainWindow(QMainWindow):
 
             # 2) Route nets with GUI progress callback
             self.log_to_gui("[PIPELINE] Step 4: Routing nets...", "INFO")
-            def progress_cb(done, total, eta_s):
+            def progress_cb(done, total, eta_s, *_, **__):
                 if self.progress_bar:
                     self.progress_bar.setValue(int(100 * done / max(total, 1)))
-                    self.progress_bar.setFormat(f"{done}/{total} nets (~{eta_s:.1f}s ETA)")
+
+                    # Defensive ETA formatting: handle float or preformatted string
+                    eta_text = ""
+                    try:
+                        # if eta_s is numeric-ish, print "~X.Xs ETA"
+                        eta_val = float(eta_s)  # works for int/float or numeric-like str
+                        eta_text = f" (~{eta_val:.1f}s ETA)"
+                    except Exception:
+                        # if it's already a string (or None), append as-is (or nothing)
+                        if eta_s:
+                            # strip to keep things tidy if caller already included units
+                            eta_text = f" ({str(eta_s).strip()})"
+
+                    self.progress_bar.setFormat(f"{done}/{total} nets{eta_text}")
 
             pf.route_multiple_nets(board.nets, progress_cb=progress_cb)
             self.log_to_gui("✓ Net routing complete", "SUCCESS")

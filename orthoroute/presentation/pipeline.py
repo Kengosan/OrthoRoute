@@ -47,7 +47,7 @@ def run_pipeline(board, router):
     
     # Step 4: Map pads to lattice (degree-aware snap, no CSR mutation)
     logger.info(f"[PIPELINE] Step 3: Mapping pads to lattice...")
-    router.map_all_pads()
+    router.map_all_pads(board)
     
     # Validate lattice freeze after pad mapping
     from ..algorithms.manhattan.graph_checks import validate_lattice_integrity
@@ -62,7 +62,7 @@ def run_pipeline(board, router):
     return results
 
 
-def create_unified_router(engine_type="unified_pathfinder", use_gpu=True):
+def create_unified_router(engine_type="unified_pathfinder", use_gpu=False):
     """DEPRECATED: Create a routing engine with fallback disabled during development.
     
     This function is deprecated. UnifiedPathFinder instances should ONLY be created

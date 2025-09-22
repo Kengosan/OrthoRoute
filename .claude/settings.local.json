@@ -37,7 +37,14 @@
       "Bash(PYTHONIOENCODING=utf-8 python -m py_compile orthoroute/algorithms/manhattan/unified_pathfinder.py)",
       "Bash(git checkout:*)",
       "Bash(tee:*)",
-      "Bash(ORTHO_CPU_ONLY=1 timeout 30 python main.py plugin)"
+      "Bash(ORTHO_CPU_ONLY=1 timeout 30 python main.py plugin)",
+      "Bash(set ORTHO_MODE=near_far)",
+      "Bash(set ORTHO_BATCH=8)",
+      "Bash(set ORTHO_PER_NET_BUDGET=0.1)",
+      "Bash(set ORTHO_BATCH=2)",
+      "Bash(set ORTHO_CPU_ONLY=1)",
+      "Bash(set ORTHO_BATCH=1)",
+      "Bash(set ORTHO_CAPACITY_END=1)"
     ],
     "deny": [],
     "ask": [],

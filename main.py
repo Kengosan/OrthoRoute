@@ -135,8 +135,8 @@ def run_cli(board_file: str, output_dir: str = ".", config_path: Optional[str] =
 
         logging.info(f"Loaded board: {board.name} with {len(board.nets)} nets")
 
-        # Create UnifiedPathFinder (same as GUI)
-        pf = UnifiedPathFinder(config=PathFinderConfig(), use_gpu=True)
+        # Create UnifiedPathFinder (same as GUI) - FORCE CPU-ONLY
+        pf = UnifiedPathFinder(config=PathFinderConfig(), use_gpu=False)
         logging.info(f"[CLI] Created UnifiedPathFinder with instance_tag={pf._instance_tag}")
 
         # Use unified pipeline (SAME THREE CALLS AS GUI)

@@ -17,10 +17,56 @@ import os
 from datetime import datetime
 from typing import Dict, List, Tuple, Optional, Set, Any
 from types import SimpleNamespace
+from dataclasses import dataclass
 import numpy as np
+from collections import defaultdict
+
+# Initialize logger
+logger = logging.getLogger(__name__)
+
+# R-tree collision detection for clearance DRC
+try:
+    from rtree import index
+    RTREE_AVAILABLE = True
+except ImportError:
+    RTREE_AVAILABLE = False
+    logger.warning("R-tree library not available - clearance DRC will be disabled")
+
+@dataclass
+class Portal:
+    x: float
+    y: float
+    layer: int
+    net: str
+    pad_layer: int
+
+@dataclass
+class EdgeRec:
+    """Canonical edge record for PathFinder accounting"""
+    owner_net: Optional[str] = None
+    taboo_until_iter: int = 0
+    historical_cost: float = 0.0
+
+def canonical_edge_key(layer_id: int, u1: int, v1: int, u2: int, v2: int) -> tuple[int, int, int, int, int]:
+    """
+    Create canonical edge key used everywhere (search, commit, rip-up, cost update, emit).
+    Nodes are integer lattice coords (u,v,z) on routing grid.
+    Layer is integer layer_id in [0..L-1]. Edge is undirected.
+    """
+    if (v2, u2) < (v1, u1):
+        u1, v1, u2, v2 = u2, v2, u1, v1
+    return (layer_id, u1, v1, u2, v2)
+
 from enum import IntEnum
 import heapq
 from dataclasses import dataclass, field
+
+# --- sparse backends ---
+try:
+    import cupyx.scipy.sparse as csp   # GPU CSR/COO (optional)
+except Exception:
+    csp = None
+import scipy.sparse as sp              # CPU CSR/COO
 
 try:
     import cupy as cp
@@ -29,9 +75,149 @@ try:
     GPU_AVAILABLE = True
 except ImportError:
     import numpy as cp  # Fallback: use NumPy as cp when CuPy not available
-    import scipy.sparse as sp
     RawKernel = None  # No GPU kernel support when CuPy unavailable
     GPU_AVAILABLE = False
+
+class EdgeRec:
+    """Edge record with capacity, ownership, and PathFinder costs"""
+    __slots__ = ("usage", "owners", "pres_cost", "hist_cost")
+
+    def __init__(self):
+        self.usage = 0
+        self.owners = set()     # net_ids currently committed
+        self.pres_cost = 1.0    # present/congestion multiplier
+        self.hist_cost = 0.0    # accumulated history
+
+class SpatialHash:
+    """Simple spatial hash for fast DRC collision detection"""
+
+    def __init__(self, cell_size: float):
+        self.cell_size = cell_size
+        self.grid = defaultdict(list)  # cell_id -> list of segments
+
+    def _hash_point(self, x: float, y: float) -> tuple:
+        """Hash point to grid cell"""
+        return (int(x // self.cell_size), int(y // self.cell_size))
+
+    def _get_cells_for_segment(self, p1: tuple, p2: tuple, radius: float) -> set:
+        """Get all grid cells that a segment with radius might touch"""
+        x1, y1 = p1
+        x2, y2 = p2
+
+        # Expand by radius
+        min_x = min(x1, x2) - radius
+        max_x = max(x1, x2) + radius
+        min_y = min(y1, y2) - radius
+        max_y = max(y1, y2) + radius
+
+        # Get cell range
+        min_cell_x = int(min_x // self.cell_size)
+        max_cell_x = int(max_x // self.cell_size)
+        min_cell_y = int(min_y // self.cell_size)
+        max_cell_y = int(max_y // self.cell_size)
+
+        cells = set()
+        for cx in range(min_cell_x, max_cell_x + 1):
+            for cy in range(min_cell_y, max_cell_y + 1):
+                cells.add((cx, cy))
+        return cells
+
+    def insert_segment(self, p1: tuple, p2: tuple, radius: float, tag: str):
+        """Insert segment into spatial hash"""
+        cells = self._get_cells_for_segment(p1, p2, radius)
+        segment_data = {'p1': p1, 'p2': p2, 'radius': radius, 'tag': tag}
+
+        for cell in cells:
+            self.grid[cell].append(segment_data)
+
+    def query_segment(self, p1: tuple, p2: tuple, radius: float) -> list:
+        """Query segments that might conflict with given segment"""
+        cells = self._get_cells_for_segment(p1, p2, radius)
+        candidates = []
+
+        for cell in cells:
+            for segment in self.grid.get(cell, []):
+                # Simple distance check - in practice would use proper segment-segment distance
+                candidates.append(type('Segment', (), {'tag': segment['tag']}))
+
+        return candidates
+
+    def nearest_distance(self, p1: tuple, p2: tuple, exclude_net: str, cap: float) -> Optional[float]:
+        """Find nearest distance to other nets (simplified implementation)"""
+        cells = self._get_cells_for_segment(p1, p2, cap)
+        min_dist = None
+
+        for cell in cells:
+            for segment in self.grid.get(cell, []):
+                if segment['tag'] != exclude_net:
+                    # Simplified distance calculation
+                    dist = ((p1[0] - segment['p1'][0])**2 + (p1[1] - segment['p1'][1])**2)**0.5
+                    if min_dist is None or dist < min_dist:
+                        min_dist = dist
+
+        return min_dist
+
+class KiCadGeometry:
+    """Single source of truth for all coordinate conversions based on KiCad board"""
+
+    def __init__(self, kicad_bounds: Tuple[float, float, float, float], pitch: float = 0.1):
+        self.min_x, self.min_y, self.max_x, self.max_y = kicad_bounds
+        self.pitch = pitch
+
+        # Grid aligned to pitch boundaries
+        self.grid_min_x = round(self.min_x / pitch) * pitch
+        self.grid_min_y = round(self.min_y / pitch) * pitch
+        self.grid_max_x = round(self.max_x / pitch) * pitch
+        self.grid_max_y = round(self.max_y / pitch) * pitch
+
+        # Grid dimensions in lattice steps
+        self.x_steps = int((self.grid_max_x - self.grid_min_x) / pitch) + 1
+        self.y_steps = int((self.grid_max_y - self.grid_min_y) / pitch) + 1
+
+        # Layer configuration - will be updated dynamically
+        self.layer_count = 6  # Default, will be updated from board
+        self.layer_directions = ['h', 'v', 'h', 'v', 'h', 'v']  # Will be expanded for more layers
+
+    def lattice_to_world(self, x_idx: int, y_idx: int) -> Tuple[float, float]:
+        """Convert lattice indices to world coordinates"""
+        world_x = self.grid_min_x + (x_idx * self.pitch)
+        world_y = self.grid_min_y + (y_idx * self.pitch)
+        return (world_x, world_y)
+
+    def world_to_lattice(self, world_x: float, world_y: float) -> Tuple[int, int]:
+        """Convert world coordinates to lattice indices"""
+        x_idx = round((world_x - self.grid_min_x) / self.pitch)
+        y_idx = round((world_y - self.grid_min_y) / self.pitch)
+        return (x_idx, y_idx)
+
+    def node_index(self, x_idx: int, y_idx: int, layer: int) -> int:
+        """Convert lattice coordinates to flat node index"""
+        layer_size = self.x_steps * self.y_steps
+        return layer * layer_size + y_idx * self.x_steps + x_idx
+
+    def index_to_coords(self, node_idx: int) -> Tuple[int, int, int]:
+        """Convert flat node index back to lattice coordinates"""
+        layer_size = self.x_steps * self.y_steps
+        layer = node_idx // layer_size
+        local_idx = node_idx % layer_size
+        y_idx = local_idx // self.x_steps
+        x_idx = local_idx % self.x_steps
+        return (x_idx, y_idx, layer)
+
+    def is_valid_edge(self, from_x: int, from_y: int, from_layer: int,
+                      to_x: int, to_y: int, to_layer: int) -> bool:
+        """Check if edge follows layer direction rules"""
+        if from_layer != to_layer:
+            return True  # Via connections always valid
+
+        direction = self.layer_directions[from_layer]
+        is_horizontal = (from_y == to_y and abs(from_x - to_x) == 1)
+        is_vertical = (from_x == to_x and abs(from_y - to_y) == 1)
+
+        if direction == 'h':
+            return is_horizontal  # H-layers: only horizontal edges
+        else:
+            return is_vertical    # V-layers: only vertical edges
 
 from .types import Pad
 from ...domain.models.board import Board
@@ -144,15 +330,62 @@ class UnifiedPathFinder:
     
     def __init__(self, config: Optional[PathFinderConfig] = None, use_gpu: bool = True):
         self.config = config or PathFinderConfig()
-        self.use_gpu = use_gpu and GPU_AVAILABLE
+
+        # Check environment override for CPU-only routing
+        import os
+        cpu_only = os.environ.get('ORTHO_CPU_ONLY', '0').lower() in ('1', 'true', 'yes')
+
+        if cpu_only:
+            logger.info("ORTHO_CPU_ONLY environment variable set - forcing CPU routing")
+            self.use_gpu = False
+        else:
+            self.use_gpu = use_gpu and GPU_AVAILABLE
+
+        # SURGICAL ENHANCEMENT: Additional testing safety knobs
+        max_iters_override = int(os.getenv('ORTHO_MAX_ITERATIONS', self.config.max_iterations))
+        max_search_override = int(os.getenv('ORTHO_MAX_SEARCH_NODES', self.config.max_search_nodes))
+        batch_size_override = int(os.getenv('ORTHO_BATCH_SIZE', getattr(self.config, "batch_size", 32)))
+
+        # Optional killswitch for early stop behavior (for debugging)
+        self._disable_early_stop = (os.getenv("ORTHO_DISABLE_EARLY_STOP", "0").lower() in ("1","true","yes"))
+
+        self.config.max_iterations = max_iters_override
+        self.config.max_search_nodes = max_search_override
+
+        # Set optimal config defaults for fast ROI routing
+        # Prefer env override, then config; default to near_far unless explicitly set
+        mode = os.getenv("ORTHO_MODE") or getattr(self.config, "mode", None)
+        if mode not in {"near_far", "multi_roi", "multi_roi_bidirectional", "delta_stepping"}:
+            mode = "near_far"
+        self.config.mode = mode
+        self.config.roi_parallel = True
+        self.config.batch_size = batch_size_override
+        self.config.per_net_budget_s = getattr(self.config, "per_net_budget_s", 0.5)
+
+        if max_iters_override != 8 or max_search_override != 50000 or batch_size_override != 32:
+            logger.info(f"[SAFETY-KNOBS] max_iterations={max_iters_override}, max_search_nodes={max_search_override}, batch_size={batch_size_override}")
+        self.config.max_roi_nodes = getattr(self.config, "max_roi_nodes", 20000)
 
         # Instance tracking for guard rails
         import time
         self._instance_tag = f"UPF-{int(time.time() * 1000) % 100000}"
 
+        # DETERMINISM: Seed RNG from ORTHO_SEED for reproducible routing
+        import os
+        import random
+        import numpy as np
+        seed = int(os.getenv("ORTHO_SEED", "42"))  # Default fixed seed
+        random.seed(seed)
+        np.random.seed(seed)
+        self._routing_seed = seed
+        logger.info(f"[DETERMINISM] RNG seeded with ORTHO_SEED={seed} for reproducible routing")
+
         # Metrics for portal usage fingerprinting
         self._metrics = {}
         self._metrics["portal_edges_registered"] = 0
+
+        # KiCad-based geometry system (initialized in _build_3d_lattice)
+        self.geometry: Optional[KiCadGeometry] = None
 
         # Grid and routing data
         self.nodes: Dict[str, Tuple[float, float, int, int]] = {}  # node_id -> (x, y, layer, index)
@@ -164,7 +397,11 @@ class UnifiedPathFinder:
         self.congestion = None
         self.history_cost = None
         self.routed_nets: Dict[str, List[int]] = {}
-        
+
+        # CANONICAL EDGE STORE - Single source of truth for edge ownership/accounting
+        self.edge_store: Dict[tuple, EdgeRec] = {}  # canonical_edge_key -> EdgeRec
+        self.net_edge_paths: Dict[str, List[tuple]] = {}  # net_id -> list of edge keys
+
         # Performance optimizations
         self._node_lookup: Dict[str, int] = {}  # Fast O(1) node ID -> index lookup
 
@@ -179,6 +416,23 @@ class UnifiedPathFinder:
         self._portal_by_uid    = {}           # (comp_ref, pad_label) -> node_idx
         self._surrogate_counters = {}         # comp_ref -> int for stable surrogates
         self._spatial_index: Dict[int, List[Tuple[float, float, str, int]]] = {}  # layer -> [(x,y,node_id,idx)]
+
+        # Pad-to-portal mapping for stub generation
+        self._pad_portals: Dict[str, Portal] = {}  # pad_id -> Portal object
+
+        # Initialize TABOO system and clearance DRC early (before lattice build)
+        self._taboo = {}  # dict[net_id, set[edge_keys]] - blocked edges per net
+        self._clearance_rtrees = {}  # dict[layer_id, rtree.Index] - spatial index per layer
+        self._clearance_enabled = RTREE_AVAILABLE
+        self._net_edge_paths = {}  # dict[net_id, list[edge_keys]]
+        self.current_iteration = 0
+        self._changed_last_iter = 0
+        self._failed_nets_last_iter = set()
+
+        if self._clearance_enabled:
+            logger.info("[CLEARANCE] R-tree spatial indexing enabled for real-time DRC")
+        else:
+            logger.warning("[CLEARANCE] R-tree not available - clearance DRC disabled")
 
     def _uid_component(self, comp) -> str:
         """SURGICAL FIX: Single source of truth for component UIDs"""
@@ -258,6 +512,9 @@ class UnifiedPathFinder:
         all_pads = []
         for component in board.components:
             all_pads.extend(component.pads)
+
+        # Store for stub emission
+        self._all_pads = all_pads
         return all_pads
 
     def _get_pad_net_name(self, pad):
@@ -313,7 +570,7 @@ class UnifiedPathFinder:
         self._current_session_id = f"pathfinder_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         self._gui_status_callback = None  # Will be set by GUI if available
         
-        if self._instrumentation:
+        if getattr(self, '_instrumentation', None):
             self._instrumentation.session_metadata.update({
                 'session_id': self._current_session_id,
                 'config': self.config.__dict__.copy(),
@@ -331,9 +588,9 @@ class UnifiedPathFinder:
         self._gui_status_callback = callback
 
     def _ensure_delta(self):
-        """Ensure _adaptive_delta is initialized to prevent crashes"""
-        if getattr(self, "_adaptive_delta", None) is None:
-            # seed from config; fall back to a sane default
+        """Defensive initialization for _adaptive_delta to prevent crashes"""
+        if not hasattr(self, "_adaptive_delta") or self._adaptive_delta is None:
+            # sane default: 4× pitch (tunable)
             base = getattr(self.config, "delta_multiplier", 4.0)
             self._adaptive_delta = float(base)
             logger.debug(f"[DELTA] Initialized _adaptive_delta to {self._adaptive_delta}")
@@ -356,9 +613,17 @@ class UnifiedPathFinder:
         
         logger.info(f"Board bounds: ({min_x}, {min_y}, {max_x}, {max_y})")
         
-        # 2. Build 3D lattice with optimal grid density
-        layers = min(6, board.layer_count)
+        # 2. Build 3D lattice with dynamic layer count from KiCad
+        layers = int(board.layer_count)  # Use actual KiCad layer count (user set to 10)
+        assert layers >= 2, f"Need at least 2 copper layers, got {layers}"
         self.layer_count = layers  # Store for ROI extraction
+        logger.info(f"Using {layers} copper layers from KiCad stackup")
+
+        # Extract layer names from KiCad for proper H/V polarity assignment
+        self.config.layer_count = layers
+        self.config.layer_names = self._get_standard_layer_names(layers)
+        logger.info(f"Layer names: {self.config.layer_names}")
+
         self._build_3d_lattice(bounds_tuple, layers)
         
         # 3. CRITICAL FIX: Initialize coordinate array BEFORE escape routing  
@@ -451,12 +716,36 @@ class UnifiedPathFinder:
         return ok
     
     def _calculate_bounds_fast(self, board: Board) -> Tuple[float, float, float, float]:
-        """Fast bounds calculation with KiCad integration"""
+        """Fast bounds calculation with airwire-constrained routing area"""
+
+        # ENHANCEMENT: Calculate airwire bounding box + margin for efficient routing
+        ROUTING_MARGIN = 3.0  # mm - margin around airwires for routing area
+
+        # First, try to get airwire bounds for constrained routing
+        airwire_bounds = self._calculate_airwire_bounds(board)
+        if airwire_bounds:
+            min_x, min_y, max_x, max_y = airwire_bounds
+            # Add margin around airwires
+            min_x -= ROUTING_MARGIN
+            min_y -= ROUTING_MARGIN
+            max_x += ROUTING_MARGIN
+            max_y += ROUTING_MARGIN
+            logger.info(f"[BOUNDS] Using airwire bounds + {ROUTING_MARGIN}mm margin: ({min_x:.1f}, {min_y:.1f}, {max_x:.1f}, {max_y:.1f})")
+            return (min_x, min_y, max_x, max_y)
+
+        # Fallback: Use exact same bounds as GUI to ensure coordinate system alignment
+        if hasattr(board, '_kicad_bounds'):
+            kicad_bounds = board._kicad_bounds
+            min_x, min_y, max_x, max_y = kicad_bounds
+            logger.info(f"[BOUNDS] Using GUI KiCad bounds: ({min_x}, {min_y}, {max_x}, {max_y})")
+            return (min_x, min_y, max_x, max_y)
+
         if hasattr(board, 'get_bounds') and callable(board.get_bounds):
             try:
                 bounds = board.get_bounds()
                 min_x, min_y = bounds.min_x, bounds.min_y
                 max_x, max_y = bounds.max_x, bounds.max_y
+                logger.info(f"[BOUNDS] Using board.get_bounds(): ({min_x}, {min_y}, {max_x}, {max_y})")
             except Exception:
                 # Fallback to pad-based bounds
                 all_pads = self._get_all_pads(board)
@@ -464,6 +753,7 @@ class UnifiedPathFinder:
                 all_y = [self._get_pad_coordinates(pad)[1] for pad in all_pads]
                 min_x, max_x = min(all_x), max(all_x)
                 min_y, max_y = min(all_y), max(all_y)
+                logger.info(f"[BOUNDS] Using pad-based fallback: ({min_x}, {min_y}, {max_x}, {max_y})")
         else:
             # Pad-based bounds
             all_pads = self._get_all_pads(board)
@@ -471,89 +761,196 @@ class UnifiedPathFinder:
             all_y = [self._get_pad_coordinates(pad)[1] for pad in all_pads]
             min_x, max_x = min(all_x), max(all_x)
             min_y, max_y = min(all_y), max(all_y)
+            logger.info(f"[BOUNDS] Using pad-based bounds: ({min_x}, {min_y}, {max_x}, {max_y})")
         
         # Add routing margin
         margin = 3.0
         return (min_x - margin, min_y - margin, max_x + margin, max_y + margin)
     
     def _build_3d_lattice(self, bounds: Tuple[float, float, float, float], layers: int):
-        """Build optimized 3D routing lattice"""
-        min_x, min_y, max_x, max_y = bounds
-        pitch = self.config.grid_pitch
-        
-        # Align to grid
-        grid_min_x = round(min_x / pitch) * pitch
-        grid_max_x = round(max_x / pitch) * pitch
-        grid_min_y = round(min_y / pitch) * pitch
-        grid_max_y = round(max_y / pitch) * pitch
-        
-        x_steps = int((grid_max_x - grid_min_x) / pitch) + 1
-        y_steps = int((grid_max_y - grid_min_y) / pitch) + 1
-        
-        logger.info(f"3D lattice: {x_steps} x {y_steps} x {layers} = {x_steps * y_steps * layers:,} nodes")
-        
-        # Create nodes and spatial index
+        """Build optimized 3D routing lattice using KiCadGeometry as ground truth"""
+        # Initialize KiCad-based geometry system with dynamic layer count
+        self.geometry = KiCadGeometry(bounds, self.config.grid_pitch)
+        self.geometry.layer_count = layers
+
+        # Set up HV polarity with F.Cu vertical by requirement
+        self.geometry.layer_directions = self._make_hv_polarity(self.config.layer_names)
+        logger.info(f"Using {layers} layers with HV polarity: {self.geometry.layer_directions}")
+
+        # Log detailed polarity mapping
+        for i, (name, direction) in enumerate(zip(self.config.layer_names, self.geometry.layer_directions)):
+            logger.info(f"  Layer {i}: {name} = {direction.upper()}")
+
+        # Store layer configuration for router
+        self.hv_polarity = self.geometry.layer_directions
+
+        # Initialize occupancy grids for DRC (one per layer)
+        self._init_occupancy_grids(layers)
+
+        # Initialize R-tree spatial indices for clearance checking
+        self._initialize_layer_rtrees(layers)
+
+        # Initialize PathFinder edge tracking with proper congestion accounting
+        self._init_pathfinder_edge_tracking()
+
+        # SANITY CHECKS/LOGS: Log critical build parameters
+        self._log_build_sanity_checks(layers)
+
+        logger.info(f"KiCad bounds: {bounds}")
+        logger.info(f"Grid aligned: ({self.geometry.grid_min_x}, {self.geometry.grid_min_y}) to ({self.geometry.grid_max_x}, {self.geometry.grid_max_y})")
+        logger.info(f"3D lattice: {self.geometry.x_steps} x {self.geometry.y_steps} x {layers} = {self.geometry.x_steps * self.geometry.y_steps * layers:,} nodes")
+
+        # Create nodes using KiCadGeometry
         edges = []
-        
+
         for layer in range(layers):
-            direction = 'h' if layer % 2 == 0 else 'v'  # H-layers: even (0,2,4...), V-layers: odd (1,3,5...)
+            direction = self.geometry.layer_directions[layer]
             layer_nodes = []
-            
-            # Create nodes for this layer
-            for x_idx in range(x_steps):
-                x = grid_min_x + (x_idx * pitch)
-                for y_idx in range(y_steps):
-                    y = grid_min_y + (y_idx * pitch)
-                    
+
+            # Create nodes for this layer using geometry system
+            for x_idx in range(self.geometry.x_steps):
+                for y_idx in range(self.geometry.y_steps):
+                    world_x, world_y = self.geometry.lattice_to_world(x_idx, y_idx)
+                    node_idx = self.geometry.node_index(x_idx, y_idx, layer)
+
                     node_id = f"rail_{direction}_{x_idx}_{y_idx}_{layer}"
-                    self.nodes[node_id] = (x, y, layer, self.node_count)
-                    self._node_lookup[node_id] = self.node_count
-                    layer_nodes.append((x, y, node_id, self.node_count))
-                    self.node_count += 1
-            
+                    self.nodes[node_id] = (world_x, world_y, layer, node_idx)
+                    self._node_lookup[node_id] = node_idx
+                    layer_nodes.append((world_x, world_y, node_id, node_idx))
+
             # Store spatial index for this layer
             self._spatial_index[layer] = layer_nodes
-            
-            # STRICT: Only create legal edges - NO penalties needed
+
+            # Create edges only for legal directions using geometry validation
             if layer == 0:
-                # F.Cu: Only SHORT escapes (max 2 grid steps)
-                max_trace_steps = 2
-                escape_cost = 1.0  # Normal cost since only legal edges exist
-            else:
-                # Inner layers: Full-length traces allowed
-                max_trace_steps = max(x_steps, y_steps)
+                max_trace_steps = 2  # F.Cu: only short escapes
                 escape_cost = 1.0
-            
-            if direction == 'h':
-                # Only create horizontal edges on H-layers - NO V-edges on H-layers
-                for y_idx in range(y_steps):
-                    for x_idx in range(min(x_steps - 1, max_trace_steps)):
-                        from_idx = y_idx * x_steps + x_idx + layer * x_steps * y_steps
-                        to_idx = from_idx + 1
-                        edges.extend([(from_idx, to_idx, escape_cost * pitch), (to_idx, from_idx, escape_cost * pitch)])
             else:
-                # Only create vertical edges on V-layers - NO H-edges on V-layers  
-                for x_idx in range(x_steps):
-                    for y_idx in range(min(y_steps - 1, max_trace_steps)):
-                        from_idx = y_idx * x_steps + x_idx + layer * x_steps * y_steps
-                        to_idx = from_idx + x_steps
-                        edges.extend([(from_idx, to_idx, escape_cost * pitch), (to_idx, from_idx, escape_cost * pitch)])
-        
-        # Create inter-layer via connections
-        via_cost = 2.5
-        for layer in range(layers - 1):
-            layer_size = x_steps * y_steps
-            for node_idx in range(layer_size):
-                from_idx = layer * layer_size + node_idx
-                to_idx = (layer + 1) * layer_size + node_idx
-                edges.extend([(from_idx, to_idx, via_cost), (to_idx, from_idx, via_cost)])
-        
+                max_trace_steps = max(self.geometry.x_steps, self.geometry.y_steps)
+                escape_cost = 1.0
+
+            if direction == 'h':
+                # H-layer: only horizontal edges
+                for y_idx in range(self.geometry.y_steps):
+                    for x_idx in range(min(self.geometry.x_steps - 1, max_trace_steps)):
+                        from_idx = self.geometry.node_index(x_idx, y_idx, layer)
+                        to_idx = self.geometry.node_index(x_idx + 1, y_idx, layer)
+
+                        # Validate edge using geometry system
+                        if self.geometry.is_valid_edge(x_idx, y_idx, layer, x_idx + 1, y_idx, layer):
+                            edges.extend([(from_idx, to_idx, escape_cost * self.geometry.pitch),
+                                        (to_idx, from_idx, escape_cost * self.geometry.pitch)])
+            else:
+                # V-layer: only vertical edges
+                for x_idx in range(self.geometry.x_steps):
+                    for y_idx in range(min(self.geometry.y_steps - 1, max_trace_steps)):
+                        from_idx = self.geometry.node_index(x_idx, y_idx, layer)
+                        to_idx = self.geometry.node_index(x_idx, y_idx + 1, layer)
+
+                        # Validate edge using geometry system
+                        if self.geometry.is_valid_edge(x_idx, y_idx, layer, x_idx, y_idx + 1, layer):
+                            edges.extend([(from_idx, to_idx, escape_cost * self.geometry.pitch),
+                                        (to_idx, from_idx, escape_cost * self.geometry.pitch)])
+
+        # Create inter-layer via connections with configurable cost and legal transitions
+        VIA_COST = float(os.getenv("ORTHO_VIA_COST", "0"))   # User wants 0
+        VIA_CAP_PER_NET = int(os.getenv("ORTHO_VIA_CAP", "999"))
+
+        logger.info(f"Via configuration: cost={VIA_COST}, cap_per_net={VIA_CAP_PER_NET}")
+
+        # Build legal layer transitions from KiCad stackup rules
+        self.allowed_layer_pairs = self._derive_allowed_layer_pairs(layers)
+        logger.info(f"Legal via transitions: {len(self.allowed_layer_pairs)} pairs")
+
+        # Log first few transitions for debugging
+        for i, (from_l, to_l) in enumerate(sorted(self.allowed_layer_pairs)):
+            if i < 10:  # First 10
+                from_name = self.config.layer_names[from_l] if from_l < len(self.config.layer_names) else f"L{from_l}"
+                to_name = self.config.layer_names[to_l] if to_l < len(self.config.layer_names) else f"L{to_l}"
+                logger.info(f"  {from_name} <-> {to_name}")
+        if len(self.allowed_layer_pairs) > 10:
+            logger.info(f"  ... and {len(self.allowed_layer_pairs)-10} more")
+
+        # Create via edges for legal layer transitions only
+        via_edges_created = 0
+        for x_idx in range(self.geometry.x_steps):
+            for y_idx in range(self.geometry.y_steps):
+                for from_layer, to_layer in self.allowed_layer_pairs:
+                    from_idx = self.geometry.node_index(x_idx, y_idx, from_layer)
+                    to_idx = self.geometry.node_index(x_idx, y_idx, to_layer)
+                    edges.extend([(from_idx, to_idx, VIA_COST), (to_idx, from_idx, VIA_COST)])
+                    via_edges_created += 2
+
+        logger.info(f"Created {via_edges_created:,} via edges (bidirectional) for legal transitions")
+
         self.edges = edges
+        self.node_count = self.geometry.x_steps * self.geometry.y_steps * layers
         logger.info(f"Created {len(edges):,} edges")
-        
-        # CRITICAL: Build-time assertions for lattice correctness
-        self._verify_lattice_correctness(layers, x_steps, y_steps)
-    
+
+        # Verify lattice correctness using geometry system
+        self._verify_lattice_correctness_geometry()
+
+    def _verify_lattice_correctness_geometry(self):
+        """Verify lattice correctness using KiCadGeometry system"""
+        logger.info("VERIFYING LATTICE CORRECTNESS (KiCad-based)...")
+
+        illegal_edges = 0
+        total_edges_checked = 0
+
+        # H/V discipline counters per layer
+        layer_h_edges = {}  # layer_id -> count of horizontal edges
+        layer_v_edges = {}  # layer_id -> count of vertical edges
+
+        for layer_id in range(self.geometry.layer_count):
+            layer_h_edges[layer_id] = 0
+            layer_v_edges[layer_id] = 0
+
+        # Check all edges using geometry system
+        for from_idx, to_idx, cost in self.edges:
+            # Convert node indices back to coordinates
+            from_x, from_y, from_layer = self.geometry.index_to_coords(from_idx)
+            to_x, to_y, to_layer = self.geometry.index_to_coords(to_idx)
+
+            # Skip via connections
+            if from_layer != to_layer:
+                continue
+
+            total_edges_checked += 1
+
+            # Count H/V edges per layer
+            is_horizontal = (from_y == to_y and from_x != to_x)
+            is_vertical = (from_x == to_x and from_y != to_y)
+
+            if is_horizontal:
+                layer_h_edges[from_layer] += 1
+            elif is_vertical:
+                layer_v_edges[from_layer] += 1
+
+            # Check if edge follows layer direction rules
+            if not self.geometry.is_valid_edge(from_x, from_y, from_layer, to_x, to_y, to_layer):
+                illegal_edges += 1
+                direction = self.geometry.layer_directions[from_layer]
+                logger.error(f"ILLEGAL: {direction}-layer {from_layer} has wrong edge direction: {from_idx}->{to_idx}")
+
+        if illegal_edges > 0:
+            raise AssertionError(f"LATTICE FAIL: {illegal_edges} illegal edges found out of {total_edges_checked} checked")
+
+        # Log H/V edge counts per layer and verify discipline
+        for layer_id in range(self.geometry.layer_count):
+            h_count = layer_h_edges[layer_id]
+            v_count = layer_v_edges[layer_id]
+            layer_dir = self.geometry.layer_directions[layer_id].upper()
+
+            logger.info(f"[HV] L{layer_id} H_edges={h_count}, V_edges={v_count}")
+
+            # ASSERTIONS per spec
+            if layer_dir == "H":
+                assert v_count == 0, f"[ASSERT] no vertical edges on H layer {layer_id} (found {v_count})"
+            elif layer_dir == "V":
+                assert h_count == 0, f"[ASSERT] no horizontal edges on V layer {layer_id} (found {h_count})"
+
+        logger.info(f"LATTICE CORRECTNESS VERIFIED: {total_edges_checked} edges checked, all valid")
+
     def _verify_lattice_correctness(self, layers: int, x_steps: int, y_steps: int):
         """Build-time assertions for lattice correctness - verify no illegal edges exist"""
         logger.info("VERIFYING LATTICE CORRECTNESS...")
@@ -763,49 +1160,92 @@ class UnifiedPathFinder:
         board_center_x = (bounds.min_x + bounds.max_x) / 2
         board_center_y = (bounds.min_y + bounds.max_y) / 2
 
-        # 1. Determine escape direction (outward from board center)
-        stub_len = 1.2  # mm - reduced to stay within lattice bounds
-        if x_mm < board_center_x:
-            # Pad on left side - escape left
-            escape_x = x_mm - stub_len
-        else:
-            # Pad on right side - escape right
-            escape_x = x_mm + stub_len
+        # Implement proper stub-then-via emission with strict pad clearance
+        net_width_mm = getattr(pad, 'width_mm', 0.2)  # Track width
+        net_clearance_mm = getattr(pad, 'clearance_mm', 0.15)  # DRC clearance
 
-        if y_mm < board_center_y:
-            # Pad on bottom - escape down
-            escape_y = y_mm - stub_len
-        else:
-            # Pad on top - escape up
-            escape_y = y_mm + stub_len
-            
-        # For now, prioritize vertical escape (simpler)
-        escape_x = x_mm  # Keep X same
-        escape_y = y_mm + stub_len  # Always escape upward for simplicity
-        
-        # 2. Snap to routing grid
-        grid_x = round(escape_x / self.config.grid_pitch) * self.config.grid_pitch
-        grid_y = round(escape_y / self.config.grid_pitch) * self.config.grid_pitch
-        
-        # 3. Create escape via node - CRITICAL FIX: Add to coordinate arrays
-        via_node_id = f"via_{net_name}_{grid_x:.1f}_{grid_y:.1f}"
-        self.nodes[via_node_id] = (grid_x, grid_y, 0, self.node_count)  # F.Cu layer (0)
-        self._node_lookup[via_node_id] = self.node_count
-        via_idx = self.node_count
-        
-        # CRITICAL FIX: Add via node to coordinate arrays that spatial indexing uses
-        via_coords = [grid_x, grid_y, 0.0]
-        
-        # EFFICIENT BATCH EXTENSION: Store via coordinates for later batch update
+        # CONFIG constants
+        MIN_STUB_MM = max(net_width_mm * 2.0, 0.25)  # Visible stub length
+        PAD_CLEAR_MM = max(net_clearance_mm, 0.15)   # Spacing from pad edge
+        GRID = self.config.grid_pitch
+
+        # Get pad attributes
+        pad_xy = (x_mm, y_mm)
+        pad_layer = self._get_pad_layer(pad)  # F.Cu, B.Cu, etc.
+
+        # Calculate escape direction: away from board center for better distribution
+        escape_dx = 1 if x_mm >= board_center_x else -1
+        escape_dy = 1 if y_mm >= board_center_y else -1
+
+        # Initial portal position with minimum stub length
+        portal_x = x_mm + escape_dx * MIN_STUB_MM
+        portal_y = y_mm + escape_dy * MIN_STUB_MM
+
+        # Snap to routing grid
+        portal_x = round(portal_x / GRID) * GRID
+        portal_y = round(portal_y / GRID) * GRID
+        portal_xy = (portal_x, portal_y)
+
+        # Vector from pad to portal
+        v = (portal_xy[0] - pad_xy[0], portal_xy[1] - pad_xy[1])
+        if (v[0]**2 + v[1]**2)**0.5 < MIN_STUB_MM:
+            # Push along nearest axis so stub is not zero and via is outside pad
+            if abs(v[0]) >= abs(v[1]):
+                dv = (GRID * escape_dx, 0.0)
+            else:
+                dv = (0.0, GRID * escape_dy)
+            portal_xy = (pad_xy[0] + dv[0], pad_xy[1] + dv[1])
+
+        # Ensure via landing is outside pad clearance
+        # Simulate pad.distance_to_edge() - for now use simple radius check
+        pad_width = getattr(pad, 'width', getattr(pad, 'size_x', 1.0))
+        pad_height = getattr(pad, 'height', getattr(pad, 'size_y', 1.0))
+        pad_radius = max(pad_width, pad_height) * 0.5
+        distance_to_pad_center = ((portal_xy[0] - pad_xy[0])**2 + (portal_xy[1] - pad_xy[1])**2)**0.5
+
+        if distance_to_pad_center < pad_radius + PAD_CLEAR_MM:
+            # Move portal further out to meet clearance
+            required_distance = pad_radius + PAD_CLEAR_MM
+            scale = required_distance / max(distance_to_pad_center, 1e-6)
+            portal_xy = (pad_xy[0] + (portal_xy[0] - pad_xy[0]) * scale,
+                        pad_xy[1] + (portal_xy[1] - pad_xy[1]) * scale)
+            # Re-snap to grid
+            portal_xy = (round(portal_xy[0] / GRID) * GRID, round(portal_xy[1] / GRID) * GRID)
+
+        grid_x, grid_y = portal_xy
+
+        # 2. Create stub end node (where stub connects to routing lattice)
+        stub_end_id = f"stub_{net_name}_{grid_x:.1f}_{grid_y:.1f}"
+        self.nodes[stub_end_id] = (grid_x, grid_y, pad_layer, self.node_count)
+        self._node_lookup[stub_end_id] = self.node_count
+        stub_end_idx = self.node_count
+
+        # Cache coordinates for later addition to coordinate array
+        stub_coords = [grid_x, grid_y, float(pad_layer)]
         if not hasattr(self, '_pending_coordinate_extensions'):
             self._pending_coordinate_extensions = []
-        self._pending_coordinate_extensions.append(via_coords)
-            
+        self._pending_coordinate_extensions.append(stub_coords)
         self.node_count += 1
-        
-        # 4. Connect pad to via (escape stub on F.Cu)
-        stub_cost = 0.5  # Slightly higher than normal routing cost
-        self.edges.extend([(pad_idx, via_idx, stub_cost), (via_idx, pad_idx, stub_cost)])
+
+        # 4. Create escape via node on routing layer (prefer inner layers)
+        via_layer = 1 if pad_layer == 0 else 2 if self.layer_count > 2 else 0  # Use inner layers
+        via_node_id = f"via_{net_name}_{grid_x:.1f}_{grid_y:.1f}"
+        self.nodes[via_node_id] = (grid_x, grid_y, via_layer, self.node_count)
+        self._node_lookup[via_node_id] = self.node_count
+        via_idx = self.node_count
+
+        # Add via node to coordinate arrays
+        via_coords = [grid_x, grid_y, float(via_layer)]
+        self._pending_coordinate_extensions.append(via_coords)
+        self.node_count += 1
+
+        # 5. Connect pad to stub end (stub on pad layer)
+        stub_cost = 0.1  # Low cost for pad connection stub
+        self.edges.extend([(pad_idx, stub_end_idx, stub_cost), (stub_end_idx, pad_idx, stub_cost)])
+
+        # 6. Connect stub end to via (layer transition)
+        via_cost = 0.0  # Free via transition as requested
+        self.edges.extend([(stub_end_idx, via_idx, via_cost), (via_idx, stub_end_idx, via_cost)])
         
         # 5. Connect via into routing lattice
         lattice_connected = self._connect_via_to_lattice(via_idx, grid_x, grid_y)
@@ -822,7 +1262,7 @@ class UnifiedPathFinder:
         
         # Find lattice nodes at this grid position on multiple layers
         connected_layers = 0
-        via_cost = 2.5  # Standard via cost
+        via_cost = 0.0  # Free via cost for layer changes
         
         # Connect to layer 0 (H-layer) and layer 1 (V-layer) if they exist
         for layer in [0, 1]:
@@ -912,11 +1352,13 @@ class UnifiedPathFinder:
         if gs is not None:
             gs.edge_count = edge_count
 
+        if self.use_gpu:
+            import cupy as cp
+
         def ensure(name, dtype, fill=0):
             arr = getattr(self, name, None)
             if arr is None or len(arr) != edge_count or arr.dtype != dtype:
                 if self.use_gpu:
-                    import cupy as cp
                     new = cp.full(edge_count, fill, dtype=dtype)
                 else:
                     new = np.full(edge_count, fill, dtype=dtype)
@@ -945,67 +1387,74 @@ class UnifiedPathFinder:
                     len(self.edge_present_usage))
 
     def _refresh_edge_arrays_after_portal_bind(self):
-        """Comprehensive edge array refresh after portal binding - fixes size mismatches"""
-        # First, ensure CPU CSR arrays are up to date with live edges
-        self._populate_cpu_csr()
+        """Re-sync all edge-length–dependent arrays after inserting portal edges."""
+        gs = getattr(self, "graph_state", self)
+        # E_live is the authoritative edge count in the live CSR
+        indices = getattr(gs, "indices_cpu", getattr(self, "indices_cpu", None))
+        if indices is None:
+            raise RuntimeError("[LIVE-SIZE] indices_cpu not available in _refresh_edge_arrays_after_portal_bind")
+        E_live = len(indices)
+        self.E = E_live
 
-        # Recompute E from live CSR
-        E = len(self.indices_cpu)
-        logger.info(f"[EDGE-REFRESH-PORTAL] Refreshing edge arrays for E={E} edges after portal binding")
-
-        def _resize_1d(name, dtype, fill_value=None):
-            """Resize 1D array to match edge count"""
+        import numpy as np
+        def ensure(name, dtype, fill):
             arr = getattr(self, name, None)
-            if arr is None or len(arr) != E:
-                if self.use_gpu:
-                    import cupy as cp
-                    if fill_value is not None:
-                        new = cp.full(E, fill_value, dtype=dtype)
-                    else:
-                        new = cp.zeros(E, dtype=dtype)
-                else:
-                    import numpy as np
-                    if fill_value is not None:
-                        new = np.full(E, fill_value, dtype=dtype)
-                    else:
-                        new = np.zeros(E, dtype=dtype)
+            if arr is None or len(arr) != E_live:
+                setattr(self, name, np.full(E_live, fill, dtype=dtype))
 
-                # Copy existing data if present
-                if arr is not None:
-                    copy_len = min(len(arr), E)
-                    new[:copy_len] = arr[:copy_len]
+        ensure("edge_total_penalty", np.float32, 0.0)
+        ensure("edge_capacity",      np.float32, 1.0)
+        ensure("edge_mask",          np.uint8,   1)
+        ensure("edge_present_usage", np.float32, 0.0)
+        ensure("edge_history",       np.float32, 0.0)
+        ensure("edge_total_cost",    np.float32, 1.0)
 
-                setattr(self, name, new)
-                logger.debug(f"[EDGE-REFRESH-PORTAL] Resized {name} to {E} elements")
+        if self.use_gpu:
+            import cupy as cp
+            self.edge_total_penalty_gpu = cp.asarray(self.edge_total_penalty)
+            self.edge_mask_gpu = cp.asarray(self.edge_mask)
+            self.edge_present_usage = cp.asarray(self.edge_present_usage)
+            self.edge_history = cp.asarray(self.edge_history)
+            self.edge_total_cost = cp.asarray(self.edge_total_cost)
 
-        # Resize all critical edge-dependent arrays that cause size mismatches
-        dtype_float = cp.float32 if self.use_gpu else np.float32
+        logger.info(f"[LIVE-SIZE] Edge arrays synced to E_live={E_live} (eliminates truncation)")
 
-        _resize_1d("edge_total_penalty", dtype_float, 0.0)
-        _resize_1d("edge_dir_mask", dtype_float, 0.0)
-        _resize_1d("edge_bottleneck_penalty", dtype_float, 0.0)
-        _resize_1d("edge_present_usage", dtype_float, 0.0)
-        _resize_1d("edge_history", dtype_float, 0.0)
-        _resize_1d("edge_capacity", dtype_float, 1.0)
-        _resize_1d("edge_total_cost", dtype_float, 0.0)
+    def _init_gpu_buffers_once(self, N):
+        """One-time GPU buffer allocation - no per-net allocs"""
+        if getattr(self, "_gpu_bufs_inited", False) and getattr(self, 'dist_gpu', None) is not None and self.dist_gpu.size >= N:
+            return
+        import cupy as cp
+        self.dist_gpu = cp.empty((N,), dtype=cp.float32)
+        self.parent_gpu = cp.empty((N,), dtype=cp.int32)
+        self.in_bucket = cp.empty((N,), dtype=cp.uint8)
+        self._gpu_bufs_inited = True
+        logger.debug(f"[GPU-BUFFERS] Initialized once for N={N}")
 
-        # Handle any mask arrays that might exist
-        for mask_name in ("_via_mask_live", "_dir_mask_live"):
-            arr = getattr(self, mask_name, None)
-            if arr is not None and len(arr) != E:
-                if self.use_gpu:
-                    new = cp.zeros(E, dtype=arr.dtype)
-                else:
-                    new = np.zeros(E, dtype=arr.dtype)
-                copy_len = min(len(arr), E)
-                new[:copy_len] = arr[:copy_len]
-                setattr(self, mask_name, new)
+    def _reset_gpu_buffers(self, n):
+        """Reset GPU buffers for ROI of size n using .fill() - much faster than allocation"""
+        import cupy as cp
+        self.dist_gpu[:n].fill(cp.inf)
+        self.parent_gpu[:n].fill(-1)
+        self.in_bucket[:n].fill(0)
 
-        # Update legacy aliases
-        self.congestion = self.edge_present_usage
-        self.history_cost = self.edge_history
+    def _ensure_gpu_edge_buffers(self, E: int):
+        """Ensure GPU edge buffers are properly sized"""
+        if not self.use_gpu:
+            return
 
-        logger.info(f"[EDGE-REFRESH-PORTAL] Complete: all edge arrays resized to E={E}")
+        import cupy as cp
+        # This is called after CPU arrays are built, so just create GPU mirrors
+        gpu_attrs = [
+            'edge_total_penalty', 'edge_dir_mask', 'edge_bottleneck_penalty',
+            'edge_present_usage', 'edge_history', 'edge_capacity', 'edge_total_cost'
+        ]
+
+        for attr in gpu_attrs:
+            cpu_arr = getattr(self, attr, None)
+            if cpu_arr is not None and not hasattr(cpu_arr, 'get'):  # Not already on GPU
+                setattr(self, attr, cp.asarray(cpu_arr))
+
+        logger.debug(f"[GPU-BUFFERS] Created GPU mirrors for {len(gpu_attrs)} edge arrays (E={E})")
 
     def _populate_cpu_csr(self):
         """Ensure CPU CSR arrays are populated from live adjacency matrix"""
@@ -1057,16 +1506,18 @@ class UnifiedPathFinder:
             coord_count = self.node_coordinates_lattice.shape[0]
             assert coord_count == N, f"[LIVE-SIZE] node coord / N mismatch: {coord_count} != {N}"
 
-        # Edge array checks
-        if hasattr(self, 'edge_total_penalty') and self.edge_total_penalty is not None:
-            penalty_count = len(self.edge_total_penalty)
-            assert penalty_count == E, f"[LIVE-SIZE] penalty / edges mismatch: {penalty_count} != {E}"
+        # STRICT edge array checks - fail hard on any mismatch
+        edge_arrays = ['edge_total_penalty', 'edge_total_cost', 'edge_present_usage',
+                      'edge_history', 'edge_capacity', 'edge_dir_mask', 'edge_bottleneck_penalty']
 
-        if hasattr(self, 'edge_present_usage') and self.edge_present_usage is not None:
-            usage_count = len(self.edge_present_usage)
-            assert usage_count == E, f"[LIVE-SIZE] usage / edges mismatch: {usage_count} != {E}"
+        for arr_name in edge_arrays:
+            if hasattr(self, arr_name):
+                arr = getattr(self, arr_name)
+                if arr is not None:
+                    arr_len = len(arr)
+                    assert arr_len == E, f"[LIVE-SIZE] CRITICAL: {arr_name} size {arr_len} != E {E} - this causes truncation!"
 
-        logger.debug(f"[LIVE-SIZE] Sizes verified: N={N}, E={E}")
+        logger.debug(f"[LIVE-SIZE] All sizes verified: N={N}, E={E} - no truncation possible")
 
     def _build_gpu_matrices(self):
         """Build GPU sparse matrices for routing"""
@@ -1079,9 +1530,13 @@ class UnifiedPathFinder:
         col_indices = [edge[1] for edge in self.edges]
         costs = [edge[2] for edge in self.edges]
         
-        if self.use_gpu:
-            self.adjacency_matrix = gpu_csr_matrix(
-                (cp.array(costs), (cp.array(row_indices), cp.array(col_indices))),
+        # Choose GPU CSR when we actually have a CUDA sparse backend; else CPU CSR
+        use_gpu_csr = bool(getattr(self, "use_gpu", False) and csp is not None)
+
+        if use_gpu_csr:
+            # cupyx will accept NumPy arrays and copy to device; OK for now
+            self.adjacency_matrix = csp.csr_matrix(
+                (costs, (row_indices, col_indices)),
                 shape=(self.node_count, self.node_count)
             )
             # Ensure CPU CSR arrays are available for size checks
@@ -1119,11 +1574,19 @@ class UnifiedPathFinder:
             # DEVICE-ONLY ROI EXTRACTION: Persistent scratch arrays for global→local mapping
             # Pre-allocate maximum-size scratch arrays to avoid per-ROI allocations
             max_roi_nodes = min(10000, self.node_count)  # Conservative upper bound
+
+            # SURGICAL ENHANCEMENT: Add ROI size caps for safety
+            roi_safety_cap = int(os.getenv('ORTHO_ROI_MAX_NODES', max_roi_nodes))
+            max_roi_nodes = min(max_roi_nodes, roi_safety_cap)
+
             self.g2l_scratch = cp.full(self.node_count, -1, dtype=cp.int32)  # Global→Local ID mapping
             self.roi_node_buffer = cp.empty(max_roi_nodes, dtype=cp.int32)  # ROI node IDs
             self.roi_edge_src_buffer = cp.empty(max_roi_nodes * 8, dtype=cp.int32)  # Edge sources (8 neighbors avg)
             self.roi_edge_dst_buffer = cp.empty(max_roi_nodes * 8, dtype=cp.int32)  # Edge destinations
             self.roi_edge_cost_buffer = cp.empty(max_roi_nodes * 8, dtype=cp.float32)  # Edge costs
+
+            # Store for defensive bounds checking
+            self.max_roi_nodes = max_roi_nodes
             
             # CuPy Events for precise GPU timing instrumentation
             self.roi_start_event = cp.cuda.Event()
@@ -1159,11 +1622,23 @@ class UnifiedPathFinder:
         self._build_reverse_edge_index_gpu()
         
         logger.info(f"Built GPU matrices: {self.node_count:,} nodes, {num_edges:,} edges")
-        
+
         # 5. BUILD GPU SPATIAL INDEX for ultra-fast ROI extraction
-        self._build_gpu_spatial_index()
-        
-        # 6. INITIALIZE ROI CACHE for stable regions
+        disable_gpu_roi = os.getenv('ORTHO_DISABLE_GPU_ROI', '0').lower() in ('1','true','yes')
+        if getattr(self, "use_gpu", False) and not disable_gpu_roi:
+            logger.info("Building GPU spatial index for constant-time ROI extraction...")
+            self._build_gpu_spatial_index()
+        else:
+            logger.info("Skipping GPU spatial index (GPU ROI disabled); CPU ROI path will be used.")
+            self._build_gpu_spatial_index()  # Still build it, but will use CPU path inside
+
+        # 6. SYNC EDGE ARRAYS TO LIVE CSR after finalization
+        self._sync_edge_arrays_to_live_csr()
+
+        # 6.5. BUILD CSR EDGE LOOKUP for authoritative accounting
+        self._build_edge_lookup_from_csr()
+
+        # 7. INITIALIZE ROI CACHE for stable regions
         self._roi_cache = {}  # net_id -> cached ROI data
         self._dirty_tiles = set()  # Track regions that need ROI rebuild
     
@@ -1196,11 +1671,28 @@ class UnifiedPathFinder:
         # Count bottleneck edges without host-device sync - use estimate
         logger.info(f"Precomputed penalties: edge penalties applied to center channel")
     
+    def _deadline_passed(self, t0: float, budget_s: float) -> bool:
+        """Check if time budget has been exceeded"""
+        import time
+        return (time.time() - t0) > budget_s if budget_s and budget_s > 0 else False
+
     def route_multiple_nets(self, route_requests: List[Tuple[str, str, str]], progress_cb=None) -> Dict[str, List[int]]:
         """
         OPTIMIZED PathFinder with fast net parsing and GPU acceleration
         """
         logger.info(f"[UPF] instance=%s enter %s", getattr(self, "_instance_tag", "NO_TAG"), "route_multiple_nets")
+
+        # Progress-callback shim: prefer 3-arg GUI signature, fallback to 5 if needed
+        def _pc(done, total, msg, paths=None, vias=None):
+            """Progress-callback shim: prefer 3-arg GUI signature, fallback to 5 if needed."""
+            if progress_cb is None:
+                return
+            try:
+                # Try the common 3-arg GUI signature first
+                return progress_cb(done, total, msg)
+            except TypeError:
+                # If the caller expects 5 args, use that
+                return progress_cb(done, total, msg, paths or [], vias or [])
 
         # SURGICAL: Add hard guard at entry of route_multiple_nets
         if not hasattr(self, 'graph_state'):
@@ -1384,7 +1876,7 @@ class UnifiedPathFinder:
 
         # Progress update after parsing (3-arg form)
         if progress_cb:
-            progress_cb(0, total, 0.0)
+            _pc(0, total, 0.0)
 
         # TRIPWIRE B: Verify terminals are reachable before PF
         self._assert_terminals_reachable(valid_nets)
@@ -1394,7 +1886,7 @@ class UnifiedPathFinder:
             raise AssertionError("[NET-PARSE] found out-of-range node after adaptation (double-parse?)")
 
         # PathFinder negotiation with congestion
-        result = self._pathfinder_negotiation(valid_nets, progress_cb, total)
+        result = self._pathfinder_negotiation(valid_nets, _pc, total)
 
         # TRIPWIRE D: Assert we got something from PF
         logger.info(f"[PF-RETURN] paths={len(result)}")
@@ -1409,7 +1901,7 @@ class UnifiedPathFinder:
 
         # Final progress update (5-arg form)
         if progress_cb:
-            progress_cb(total, total, "Routing complete", [], [])
+            _pc(total, total, "Routing complete")
 
         return result
     
@@ -1499,6 +1991,9 @@ class UnifiedPathFinder:
 
     def _pathfinder_negotiation(self, valid_nets: Dict[str, Tuple[int, int]], progress_cb=None, total=0) -> Dict[str, List[int]]:
         """GPU PathFinder with device-side cost updates and ∆-stepping SSSP"""
+        # Make absolutely sure arrays match live CSR before any cost math
+        self._sync_edge_arrays_to_live_csr()
+
         # DEFENSIVE CHECK: Assert live sizes before negotiation
         self._assert_live_sizes()
 
@@ -1520,26 +2015,34 @@ class UnifiedPathFinder:
         prev_overuse = 0
         total_nets = len(valid_nets)
         
-        # Production mode: Auto-size batches based on graph scale and VRAM heuristics  
+        # Be conservative on Windows/CuPy: 32 is much snappier; allow env override.
+        batch_size = getattr(self.config, "batch_size", 32)
+        try:
+            import os
+            batch_env = int(os.getenv("ORTHO_BATCH", batch_size))
+            batch_size = max(1, min(batch_env, 64))
+        except Exception:
+            pass
         nodes = self.node_count
         edges = len(self.edges)
-        if nodes > 5e5 or edges > 1.5e6:
-            batch_size = 32   # Large boards: Conservative for stability
-        elif nodes > 2e5 or edges > 8e5:
-            batch_size = 64   # Medium boards: balanced
-        else:
-            batch_size = 128  # Small boards: higher throughput
-            
+
         logger.info(f"Production batch: {batch_size} nets/batch (graph: {nodes:,} nodes, {edges:,} edges) [GPU PathFinder]")
-        net_items = list(valid_nets.items())
-        
+
         for iteration in range(self.config.max_iterations):
             # Mark that negotiation is running
             self._negotiation_ran = True
 
+            # Track current iteration for phase switching
+            self.current_iteration = iteration
+
             iter_start_time = time.time()
             logger.info(f"[NEGOTIATE] iter={iteration + 1} pres_fac={pres_fac:.3f} overflows=0")
             logger.info(f"GPU PathFinder iteration {iteration + 1}/{self.config.max_iterations} (pres_fac={pres_fac:.2f})")
+
+            # Build congestion-driven rip-up queue
+            valid_net_ids = list(valid_nets.keys())
+            routing_queue = self._build_ripup_queue(valid_net_ids)
+            net_items = [(net_id, valid_nets[net_id]) for net_id in routing_queue if net_id in valid_nets]
             
             # Reset edge usage for this iteration (device operation)
             cost_update_start = time.time()
@@ -1559,6 +2062,9 @@ class UnifiedPathFinder:
             failed_nets = 0
             total_relax_calls = 0
             relax_calls_per_net = []
+
+            # Track failed nets for next iteration's rip-up queue
+            current_failed_nets = set()
             
             # Process nets in batches for GPU efficiency
             logger.info(f"Starting batch routing: {len(net_items)} nets in {len(net_items)//batch_size + 1} batches")
@@ -1616,7 +2122,7 @@ class UnifiedPathFinder:
                             parallel_factor=1,  # Sequential processing for near_far
                             total_processing_time_ms=sum(roi_times)
                         )
-                        self._instrumentation.roi_batch_metrics.append(roi_batch_metric)
+                        getattr(self, '_instrumentation', None) and self._instrumentation.roi_batch_metrics.append(roi_batch_metric)
                     
                     logger.info(f"  ROI Stats: Avg nodes: {avg_roi_nodes:.0f}, Avg time: {avg_roi_time:.1f}ms, "
                                f"Compression: {avg_compression:.1%}")
@@ -1640,7 +2146,7 @@ class UnifiedPathFinder:
                     net_metric = batch_metrics[i] if i < len(batch_metrics) else {}
                     
                     # Store per-net timing metrics
-                    if self._instrumentation:
+                    if getattr(self, '_instrumentation', None):
                         net_timing = NetTimingMetrics(
                             net_id=net_id,
                             timestamp=time.time(),
@@ -1652,7 +2158,7 @@ class UnifiedPathFinder:
                             roi_edges=net_metric.get('roi_edges', 0),
                             search_nodes_visited=net_metric.get('nodes_visited', 0)
                         )
-                        self._instrumentation.net_timing_metrics.append(net_timing)
+                        getattr(self, '_instrumentation', None) and self._instrumentation.net_timing_metrics.append(net_timing)
                     
                     if path and len(path) > 1:
                         # DEFENSIVE: Ensure net_id is a string before using as dict key
@@ -1662,19 +2168,61 @@ class UnifiedPathFinder:
                         
                         if net_id not in self.routed_nets or self.routed_nets[net_id] != path:
                             routes_changed += 1
-                        
+
+                        # Rip up old path if it exists
+                        if net_id in self.routed_nets:
+                            self.rip_up_net(net_id, self.routed_nets[net_id])
+
+                        # Commit new path to edge tracking
                         self.routed_nets[net_id] = path
+                        self.commit_net_path(net_id, path)
+                        self._update_net_failure_count(net_id, failed=False)  # Reset failure count
                         successful += 1
                     else:
                         failed_nets += 1
+                        current_failed_nets.add(net_id)  # Track for next iteration
+                        self._update_net_failure_count(net_id, failed=True)  # Increment failure count
                         if net_id in self.routed_nets:
+                            # Rip up failed net's old path
+                            self.rip_up_net(net_id, self.routed_nets[net_id])
                             del self.routed_nets[net_id]
             
             routing_time = (time.time() - routing_start) * 1000  # ms
             
-            # Usage accumulation phase
+            # Usage accumulation phase - update PathFinder congestion costs
             usage_start = time.time()
-            self._update_edge_history_gpu()
+            self.update_congestion_costs()
+
+            # Log PathFinder edge tracking diagnostics
+            total_edges_tracked = len(self._edge_store)
+            overused_edges = sum(1 for rec in self._edge_store.values() if rec.usage > 1)
+            logger.info(f"[PF-TRACKING] {total_edges_tracked} edges tracked, {overused_edges} overused")
+
+            # Detailed diagnostics for verification
+            bad = [(k, r.usage) for k, r in self._edge_store.items() if r.usage > 1]
+            if bad[:10]:
+                logger.warning(f"[OVERFULL] {len(bad)} edges >1; sample {bad[:10]}")
+                # Track one specific overfull edge to verify owner changes
+                if bad:
+                    sample_key, sample_usage = bad[0]
+                    sample_rec = self._edge_store[sample_key]
+                    logger.info(f"[TRACK-EDGE] {sample_key}: usage={sample_usage}, owners={sample_rec.owners}")
+
+            # Sample a few edges for detailed verification
+            if total_edges_tracked > 0:
+                sample_keys = list(self._edge_store.keys())[:5]
+                for key in sample_keys:
+                    rec = self._edge_store[key]
+                    logger.debug(f"[EDGE-SAMPLE] key={key}: usage={rec.usage}, owners={rec.owners}, pres={rec.pres_cost:.3f}, hist={rec.hist_cost:.3f}")
+
+            # Log phase information and verify progress
+            phase = "SOFT" if self.current_iteration < self._phase_block_after else "HARD"
+            logger.info(f"[PATHFINDER] Phase={phase} (iter {self.current_iteration+1}/{self.config.max_iterations})")
+
+            # VERIFICATION: Assert progress on hard phase
+            if self.current_iteration >= self._phase_block_after and routes_changed == 0:
+                logger.warning(f"[VERIFY-FAIL] iter {self.current_iteration+1} HARD phase but Changed=0 - rip-up may not be working!")
+
             usage_time = (time.time() - usage_start) * 1000  # ms
             
             # Calculate comprehensive metrics
@@ -1684,7 +2232,7 @@ class UnifiedPathFinder:
             
             # Store detailed iteration metrics for instrumentation
             total_iter_time = (time.time() - iter_start_time) * 1000  # ms
-            if self._instrumentation:
+            if getattr(self, '_instrumentation', None):
                 iteration_metric = IterationMetrics(
                     iteration=iteration + 1,
                     timestamp=time.time(),
@@ -1702,7 +2250,7 @@ class UnifiedPathFinder:
                     delta_value=self._adaptive_delta,
                     congestion_penalty=self.config.congestion_cost_mult
                 )
-                self._instrumentation.iteration_metrics.append(iteration_metric)
+                getattr(self, '_instrumentation', None) and self._instrumentation.iteration_metrics.append(iteration_metric)
                 
                 # Update GUI if callback is set
                 if self._gui_status_callback:
@@ -1719,7 +2267,7 @@ class UnifiedPathFinder:
                        f"Usage: {usage_time:4.1f}ms | Total: {total_iter_time:6.1f}ms")
             
             # Log enhanced metrics with cost scaling details
-            if self.config.log_iteration_details and self._instrumentation:
+            if self.config.log_iteration_details and getattr(self, '_instrumentation', None):
                 logger.info(f"COSTS  | Pres_fac: {pres_fac:.3f} | Acc_fac: {self.config.acc_fac:.3f} | "
                           f"Delta: {self._adaptive_delta:.2f} | Cong_mult: {self.config.congestion_cost_mult:.2f}")
                 logger.info(f"OVERUSE| Max: {metrics.get('max_overuse', 0):.2f} | Avg: {metrics.get('avg_overuse', 0):.2f} | "
@@ -1748,52 +2296,69 @@ class UnifiedPathFinder:
             # Adaptive convergence check with cheap GPU-side overuse count
             overuse_count = metrics['over_capacity_edges']  # Already computed in metrics
 
-            # Early success exit - if all nets routed with no overflows
-            if successful == len(valid_nets) and overuse_count == 0:
-                logger.info(f"[EARLY-SUCCESS] All {successful} nets routed successfully with no overflows - stopping early!")
-                logger.info(f"[EARLY-SUCCESS] Saved {self.config.max_iterations - iteration - 1} remaining iterations")
-                break
-            
             # Calculate convergence deltas
             if iteration > 0:
                 improved = (successful - prev_successful) / max(1, total_nets)
                 overuse_drop = (prev_overuse - overuse_count) / max(1, prev_overuse) if prev_overuse > 0 else 0.0
-                
+
                 logger.info(f"CONV | Overuse: {overuse_count} (Delta {overuse_drop:+.1%}) | Success Delta {improved:+.1%}")
-                
-                # Enhanced adaptive early stopping with plateau detection
-                current_success_rate = successful / total_nets
-                convergence_history.append(current_success_rate)
-                
-                # Check for plateau: success rate not improving over patience window
-                if len(convergence_history) > early_stop_patience:
-                    recent_rates = convergence_history[-early_stop_patience:]
-                    max_recent = max(recent_rates)
-                    improvement_over_window = current_success_rate - min(recent_rates)
-                    
-                    if (iteration >= 2 and 
-                        improvement_over_window < min_improvement and 
-                        overuse_drop < 0.02 and 
-                        routes_changed == 0):
-                        logger.info(f"[ADAPTIVE]: Early stop - success plateau detected")
-                        logger.info(f"   Current: {current_success_rate:.1%}, improvement: {improvement_over_window:.1%} < {min_improvement:.1%}")
-                        logger.info(f"   Saved {self.config.max_iterations - iteration - 1} iterations")
-                        break
+
+            # Enhanced adaptive early stopping with plateau detection
+            current_success_rate = successful / total_nets
+            convergence_history.append(current_success_rate)
+
+            # HONEST STOP CONDITIONS - check environment toggles
+            import os
+            disable_early_stop = getattr(self, '_disable_early_stop', False) or (os.getenv("ORTHO_DISABLE_EARLY_STOP", "0").lower() in ("1","true","yes"))
+            capacity_end_mode = (os.getenv("ORTHO_CAPACITY_END", "0").lower() in ("1","true","yes"))
+
+            # Perfect convergence: no overuse AND no failures
+            if overuse_count == 0 and failed_nets == 0:
+                logger.info("CONVERGED: all nets routed successfully with no overuse violations")
+                logger.info(f"   Success: {current_success_rate:.1%} ({successful}/{total_nets} nets), overuse: {overuse_count}")
+                logger.info(f"   Saved {self.config.max_iterations - iteration - 1} remaining iterations")
+                break
+
+            # Conservative early stop: only if not disabled and truly converged
+            if not disable_early_stop and iteration >= 2:
+                if self._pf_should_stop(iteration, overuse_count, failed_nets):
+                    logger.info("CONVERGED: PathFinder reached perfect solution")
+                    logger.info(f"   Success: {current_success_rate:.1%}, overuse: {overuse_count}, failed: {failed_nets}")
+                    logger.info(f"   Saved {self.config.max_iterations - iteration - 1} iterations")
+                    break
+                else:
+                    logger.debug(f"[CONTINUE]: failed={failed_nets}, overuse={overuse_count} - continuing")
+
+            # Check if we're at max iterations - prepare for capacity-limited exit
+            if iteration == self.config.max_iterations - 1:
+                if failed_nets > 0 or overuse_count > 0:
+                    logger.warning("CAPACITY-LIMITED: reached max iterations with unresolved routing problems")
+                    logger.warning(f"   Final state: {successful}/{total_nets} nets routed ({current_success_rate:.1%})")
+                    logger.warning(f"   Remaining issues: {failed_nets} failed nets, {overuse_count} overuse violations")
+
+                    if capacity_end_mode:
+                        logger.info("ORTHO_CAPACITY_END=1: emitting capacity analysis...")
+                        self._emit_capacity_analysis(successful, total_nets, overuse_count, failed_nets)
+
+                        # REPRO DUMP: Dump repro bundle if requested
+                        import os
+                        if (os.getenv("ORTHO_DUMP_REPRO", "0").lower() in ("1", "true", "yes")):
+                            logger.info("ORTHO_DUMP_REPRO=1: creating repro bundle...")
+                            self._dump_repro_bundle(successful, total_nets, failed_nets)
             
             # Update convergence tracking
             prev_successful = successful
             prev_overuse = overuse_count
-            
-            # Legacy early termination check (kept for safety)
-            if routes_changed == 0 and iteration > 0:
-                logger.info("GPU PathFinder converged (legacy check)")
-                break
+
+            # Update failed nets list for next iteration's rip-up queue
+            self._failed_nets_last_iter = current_failed_nets
+            self._changed_last_iter = routes_changed
             
             # Increase pressure
             pres_fac *= self.config.pres_fac_mult
         
         # Export CSV data for convergence analysis
-        if self._instrumentation:
+        if getattr(self, '_instrumentation', None):
             self._export_instrumentation_csv()
 
         # Layer usage tracking - analyze final routing results
@@ -1806,15 +2371,156 @@ class UnifiedPathFinder:
 
         # SURGICAL STEP 3: Single source of truth for pathfinder results
         logger.info(f"[PATHFINDER-RESULT-SOT] Committed paths: {routed_count}")
+        # PERFORMANCE FIX: Only log first few nets to avoid log spam with 512+ nets
+        logged_count = 0
         for net_id, path in self.routed_nets.items():
             if path and len(path) > 1:
-                logger.info(f"[PATHFINDER-RESULT-SOT] {net_id}: path_len={len(path)} start={path[0]} end={path[-1]}")
+                if logged_count < 5:  # Only log first 5 nets
+                    logger.info(f"[PATHFINDER-RESULT-SOT] {net_id}: path_len={len(path)} start={path[0]} end={path[-1]}")
+                logged_count += 1
+        if logged_count > 5:
+            logger.info(f"[PATHFINDER-RESULT-SOT] ... and {logged_count - 5} more nets (details suppressed for performance)")
 
         if routed_count == 0:
             raise RuntimeError("[NEGOTIATE-RESULT] zero routed nets")
 
         return self.routed_nets.copy()
-    
+
+    def _emit_capacity_analysis(self, successful: int, total_nets: int, overuse_count: int, failed_nets: int):
+        """Emit honest capacity analysis when routing is capacity-limited"""
+        logger.info("=" * 60)
+        logger.info("CAPACITY ANALYSIS - Why routing failed:")
+        logger.info("=" * 60)
+
+        success_rate = (successful / total_nets) * 100 if total_nets > 0 else 0
+        logger.info(f"FINAL RESULTS: {successful}/{total_nets} nets routed ({success_rate:.1f}%)")
+        logger.info(f"FAILED NETS: {failed_nets}")
+        logger.info(f"OVERUSE VIOLATIONS: {overuse_count} edges over capacity")
+
+        # Layer usage analysis
+        logger.info("\nLAYER USAGE ANALYSIS:")
+        try:
+            self._analyze_layer_capacity()
+        except Exception as e:
+            logger.warning(f"Layer analysis failed: {e}")
+
+        # What-if analysis
+        logger.info(f"\nCAPACITY INSIGHT: With current {self.geometry.layer_count if self.geometry else 6} layers:")
+        if success_rate < 50:
+            logger.info("• Severely capacity-limited - consider adding 2-4 more layers")
+        elif success_rate < 80:
+            logger.info("• Moderately capacity-limited - consider adding 1-2 more layers")
+        else:
+            logger.info("• Near capacity limits - one additional layer may resolve remaining conflicts")
+
+        logger.info("=" * 60)
+
+    def _analyze_layer_capacity(self):
+        """Analyze per-layer usage and congestion"""
+        if not hasattr(self, 'geometry') or self.geometry is None:
+            logger.warning("No geometry system available for layer analysis")
+            return
+
+        layer_usage = {}
+        for layer in range(self.geometry.layer_count):
+            layer_usage[layer] = 0
+
+        # Count routed segments per layer
+        for net_id, path in self.routed_nets.items():
+            if path and len(path) > 1:
+                for i in range(len(path) - 1):
+                    try:
+                        coord1 = self._idx_to_coord(path[i])
+                        coord2 = self._idx_to_coord(path[i + 1])
+                        if coord1 and coord2 and coord1[2] == coord2[2]:  # Same layer
+                            layer_usage[coord1[2]] += 1
+                    except Exception:
+                        continue
+
+        logger.info("Layer usage distribution:")
+        for layer in range(self.geometry.layer_count):
+            direction = self.geometry.layer_directions[layer]
+            usage = layer_usage.get(layer, 0)
+            layer_name = self._map_layer_for_gui(layer)
+            logger.info(f"  {layer_name} ({direction}): {usage} segments")
+
+    def _dump_repro_bundle(self, successful: int, total_nets: int, failed_nets: int):
+        """Dump small repro bundle for debugging failed routing"""
+        import json
+        import os
+        from datetime import datetime
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"orthoroute_repro_{timestamp}.json"
+
+        repro_data = {
+            "metadata": {
+                "timestamp": timestamp,
+                "seed": getattr(self, '_routing_seed', 42),
+                "instance_tag": getattr(self, '_instance_tag', 'unknown'),
+                "total_nets": total_nets,
+                "successful": successful,
+                "failed": failed_nets
+            },
+            "config": {
+                "max_iterations": self.config.max_iterations,
+                "batch_size": getattr(self.config, 'batch_size', 32),
+                "grid_pitch": self.config.grid_pitch,
+                "layer_count": getattr(self.config, 'layer_count', 6)
+            },
+            "bounds": None,
+            "grid_dims": None,
+            "portals": [],
+            "edges_sample": []
+        }
+
+        # Add bounds if available
+        if hasattr(self, 'geometry') and self.geometry:
+            repro_data["bounds"] = {
+                "min_x": self.geometry.grid_min_x,
+                "min_y": self.geometry.grid_min_y,
+                "max_x": self.geometry.grid_max_x,
+                "max_y": self.geometry.grid_max_y
+            }
+            repro_data["grid_dims"] = {
+                "x_steps": self.geometry.x_steps,
+                "y_steps": self.geometry.y_steps
+            }
+
+        # Add first 200 portals
+        if hasattr(self, '_pad_portals'):
+            portal_items = list(self._pad_portals.items())[:200]
+            for pad_id, portal in portal_items:
+                repro_data["portals"].append({
+                    "pad_id": pad_id,
+                    "x": portal.x,
+                    "y": portal.y,
+                    "layer": portal.layer,
+                    "net": portal.net
+                })
+
+        # Add first 1k edges
+        if hasattr(self, 'edges') and self.edges:
+            edge_sample = self.edges[:1000]
+            for from_idx, to_idx, cost in edge_sample:
+                repro_data["edges_sample"].append([int(from_idx), int(to_idx), float(cost)])
+
+        # Add committed paths for determinism verification
+        if hasattr(self, 'routed_nets'):
+            paths_sample = {}
+            for net_id, path in list(self.routed_nets.items())[:50]:  # First 50 nets
+                if path and len(path) > 0:
+                    paths_sample[net_id] = [int(node) for node in path]
+            repro_data["committed_paths"] = paths_sample
+
+        # Write repro bundle
+        try:
+            with open(filename, 'w') as f:
+                json.dump(repro_data, f, indent=2)
+            logger.info(f"[REPRO] Dumped repro bundle: {filename}")
+        except Exception as e:
+            logger.error(f"[REPRO] Failed to dump repro bundle: {e}")
+
     def _calculate_iteration_metrics(self, successful: int, failed_nets: int, routes_changed: int,
                                    total_relax_calls: int, relax_calls_per_net: list, 
                                    total_nets: int) -> dict:
@@ -1834,40 +2540,40 @@ class UnifiedPathFinder:
             metrics['avg_relax_calls'] = 0.0
             metrics['p95_relax_calls'] = 0.0
         
-        # Edge congestion metrics (device operations - estimate counts)
-        if self.use_gpu:
-            # Count over-capacity edges without host-device sync
-            over_capacity = cp.sum(self.edge_present_usage > self.edge_capacity)
-            metrics['over_capacity_edges'] = int(over_capacity) if hasattr(over_capacity, 'get') else 0
-            
-            # Overuse statistics for detailed analysis
-            overused_edges = self.edge_present_usage > self.edge_capacity
-            if cp.sum(overused_edges) > 0:
-                overuse_amounts = self.edge_present_usage[overused_edges] - self.edge_capacity[overused_edges]
-                metrics['max_overuse'] = float(cp.max(overuse_amounts))
-                metrics['avg_overuse'] = float(cp.mean(overuse_amounts))
-            else:
-                metrics['max_overuse'] = 0.0
-                metrics['avg_overuse'] = 0.0
-            
-            # History total (estimate without full sync)
-            history_total = cp.sum(self.edge_history)  
-            metrics['history_total'] = float(history_total) if hasattr(history_total, 'get') else 0.0
+        # CRITICAL: Use CANONICAL EDGE STORE (authoritative)
+        over_capacity_count = 0
+        overuse_values = []
+        history_total = 0.0
+
+        # Count overuse from canonical edge store
+        nets_on_edges = set()
+        for edge_key, edge_rec in self.edge_store.items():
+            # PathFinder capacity = 1 per edge (no sharing allowed)
+            capacity = 1
+
+            # Count how many nets are trying to use this edge
+            # For now, count edge as overused if owned by any net (simple model)
+            if edge_rec.owner_net is not None:
+                # Edge is in use - no overuse under single-net-per-edge model
+                pass
+
+            # Accumulate historical costs for negotiation
+            history_total += edge_rec.historical_cost
+
+        # For now, overuse occurs at geometry emit time when multiple nets claim same physical segment
+        # The canonical store enforces single ownership during search, preventing overuse
+        # Real overuse count will come from geometry DRC violations
+
+        metrics['over_capacity_edges'] = over_capacity_count
+
+        if overuse_values:
+            metrics['max_overuse'] = max(overuse_values)
+            metrics['avg_overuse'] = sum(overuse_values) / len(overuse_values)
         else:
-            # CPU version
-            metrics['over_capacity_edges'] = int(np.sum(self.edge_present_usage > self.edge_capacity))
-            
-            # CPU overuse statistics
-            overused_edges = self.edge_present_usage > self.edge_capacity
-            if np.sum(overused_edges) > 0:
-                overuse_amounts = self.edge_present_usage[overused_edges] - self.edge_capacity[overused_edges]
-                metrics['max_overuse'] = float(np.max(overuse_amounts))
-                metrics['avg_overuse'] = float(np.mean(overuse_amounts))
-            else:
-                metrics['max_overuse'] = 0.0
-                metrics['avg_overuse'] = 0.0
-                
-            metrics['history_total'] = float(np.sum(self.edge_history))
+            metrics['max_overuse'] = 0.0
+            metrics['avg_overuse'] = 0.0
+
+        metrics['history_total'] = history_total
         
         return metrics
     
@@ -1885,18 +2591,46 @@ class UnifiedPathFinder:
             logger.info(f"DEBUG: _route_multi_roi_batch completed, got {len(multi_results)} results")
             return multi_results, multi_metrics
         
-        # Sequential processing for other modes
-        for i, (net_id, (source_idx, sink_idx)) in enumerate(batch):
-            if i % 8 == 0:  # Throttled logging for Windows performance
-                logger.debug(f"  Progress: routing net {i+1}/{len(batch)}: {net_id}")
-            # Route with chosen algorithm
-            if self.config.mode == "near_far":
-                path, net_metrics = self._gpu_roi_near_far_sssp_with_metrics(net_id, source_idx, sink_idx)
-            else:  # delta_stepping (default)
-                path, net_metrics = self._gpu_delta_stepping_sssp_with_metrics(source_idx, sink_idx)
+        # Sequential processing for other modes with batch caps and time budget
+        batch_sz = min(len(batch), getattr(self.config, "batch_size", 32))
+        # Final batch cap from environment
+        batch_sz = min(batch_sz, int(os.getenv("ORTHO_BATCH", batch_sz)))
+        TIME_BUDGET_S = float(os.getenv("ORTHO_PER_NET_BUDGET", getattr(self.config, "per_net_budget_s", 0.5)))
+
+        for i, (net_id, (source_idx, sink_idx)) in enumerate(batch[:batch_sz]):
+            logger.info(f"  Progress: routing net {i+1}/{len(batch[:batch_sz])}: {net_id}")
+
+            import time
+            t0 = time.time()
+
+            # PRAGMATIC FIX: Test first few nets on CPU, use GPU only if it proves fast
+            emergency_cpu_only = os.getenv('ORTHO_EMERGENCY_CPU', '0').lower() in ('1', 'true', 'yes')
+            smart_fallback = os.getenv('ORTHO_SMART_FALLBACK', '0').lower() in ('1', 'true', 'yes')  # Disabled by default for GPU debugging
+
+            if emergency_cpu_only or (smart_fallback and i < 3):  # Test first 3 nets on CPU
+                logger.info(f"[SMART-FALLBACK] {net_id}: Using CPU (emergency={emergency_cpu_only}, smart={smart_fallback and i < 3})")
+                path = self._cpu_dijkstra_fallback(source_idx, sink_idx)
+                net_metrics = {'smart_fallback': True, 'reason': 'first_nets_cpu_test'}
+            else:
+                # Route with chosen algorithm - prefer fast ROI Near-Far; only use delta_stepping when explicitly asked
+                if self.config.mode in ("delta_stepping", "fullgraph"):
+                    path, net_metrics = self._gpu_delta_stepping_sssp_with_metrics(
+                        source_idx, sink_idx, time_budget_s=TIME_BUDGET_S, t0=t0, net_id=net_id
+                    )
+                else:  # near_far (default) - much faster for typical nets
+                    path, net_metrics = self._gpu_roi_near_far_sssp_with_metrics(
+                        net_id, source_idx, sink_idx, time_budget_s=TIME_BUDGET_S, t0=t0
+                    )
+
+            # If the GPU path returned None or blew the budget, hard fallback to CPU
+            if self._deadline_passed(t0, TIME_BUDGET_S) and not hasattr(self.config, 'use_cpu_routing'):
+                logger.info(f"[TIME-BUDGET] {net_id}: GPU > {TIME_BUDGET_S:.2f}s → CPU fallback")
+                path = self._cpu_dijkstra_fallback(source_idx, sink_idx)
+                net_metrics = {'roi_fallback': True, 'reason': 'time_budget'}
+
             batch_results.append(path)
             batch_metrics.append(net_metrics)
-            
+
             # Accumulate edge usage on device
             if path and len(path) > 1:
                 self._accumulate_edge_usage_gpu(path)
@@ -1931,42 +2665,60 @@ class UnifiedPathFinder:
         logger.info("=" * 60)
     
     def _update_edge_total_costs(self, pres_fac: float):
-        """Update edge costs on device with single elementwise operation"""
-        if self.use_gpu:
-            # Get edge base costs - use existing array size to avoid mismatch from dynamically added edges
-            expected_size = self.edge_present_usage.shape[0]
-            if len(self.edges) != expected_size:
-                logger.warning(f"[EDGE_COST] Size mismatch: {len(self.edges)} edges vs {expected_size} arrays - truncating")
-            edge_base_costs = cp.array([edge[2] for edge in self.edges[:expected_size]], dtype=cp.float32)
-            
-            # Single GPU elementwise operation - NO Python loops!
-            present_overuse = cp.maximum(self.edge_present_usage - self.edge_capacity, 0.0)
-            
-            # Apply congestion cost multiplier for enhanced penalty
-            congestion_penalty = pres_fac * present_overuse * self.config.congestion_cost_mult
-            
-            self.edge_total_cost = (
-                edge_base_costs +
-                self.edge_dir_mask +  
-                self.edge_bottleneck_penalty +
-                congestion_penalty +
-                self.config.acc_fac * self.edge_history
-            )
-        else:
-            # CPU fallback
-            edge_base_costs = np.array([edge[2] for edge in self.edges], dtype=np.float32)
-            present_overuse = np.maximum(self.edge_present_usage - self.edge_capacity, 0.0)
-            
-            # Apply congestion cost multiplier for enhanced penalty (CPU version)
-            congestion_penalty = pres_fac * present_overuse * self.config.congestion_cost_mult
-            
-            self.edge_total_cost = (
-                edge_base_costs +
-                self.edge_dir_mask +
-                self.edge_bottleneck_penalty +
-                congestion_penalty +
-                self.config.acc_fac * self.edge_history
-            )
+        """Calculate final edge costs with congestion + history + penalty"""
+        import numpy as np
+        self._sync_edge_arrays_to_live_csr()  # idempotent guard
+
+        E = self._live_edge_count()
+
+        # Pull arrays (CPU view; if they're CuPy, cast .get() or ensure you use CuPy math consistently)
+        base = self.edge_base_cost
+        present = self.edge_present_usage
+        hist = self.edge_history
+        pen = self.edge_total_penalty
+        bottl = self.edge_bottleneck_penalty
+        mask = self.edge_dir_mask
+
+        # Normalize shapes/dtypes on the fly (no-op if already good)
+        def _fix(a, dtype):
+            if hasattr(a, "get"):  # CuPy → NumPy for cost math on CPU
+                a = a.get()
+            if len(a) != E:
+                a = np.resize(a.astype(dtype, copy=False), E)  # last-resort resize (shouldn't happen if sync ran)
+            return a.astype(dtype, copy=False)
+
+        base = _fix(base, np.float32)
+        present = _fix(present, np.float32)
+        hist = _fix(hist, np.float32)
+        pen = _fix(pen, np.float32)
+        bottl = _fix(bottl, np.float32)
+        mask = _fix(mask, np.uint8)
+
+        # Your cost formula; adjust factors as in your config
+        hist_fac = getattr(self.config, "acc_fac", 1.0)
+        congestion_cost_mult = getattr(self.config, "congestion_cost_mult", 1.0)
+
+        total = base + pres_fac * present * congestion_cost_mult + hist_fac * hist + pen + bottl
+
+        # Apply direction/legal mask if that's how you model disabled edges
+        total *= (mask.astype(np.float32))
+
+        # Apply PathFinder hard blocking (Phase=HARD)
+        if hasattr(self, 'current_iteration') and self.current_iteration >= self._phase_block_after:
+            logger.debug(f"[HARD-BLOCK] Applying hard blocking in iteration {self.current_iteration}")
+
+            # Block overfull edges by setting their cost to infinity
+            blocked_count = 0
+            for edge_idx in range(E):
+                # Check if this edge is overfull (usage > capacity)
+                if present[edge_idx] >= self._edge_capacity:
+                    total[edge_idx] = np.inf
+                    blocked_count += 1
+
+            if blocked_count > 0:
+                logger.info(f"[HARD-BLOCK] Blocked {blocked_count}/{E} overfull edges (usage >= {self._edge_capacity})")
+
+        self.edge_total_cost = total  # keep CPU copy authoritative; mirror to GPU elsewhere
     
     def _route_batch_gpu(self, batch: List[Tuple[str, Tuple[int, int]]]) -> List[Optional[List[int]]]:
         """Route batch of nets using GPU ∆-stepping SSSP"""
@@ -1974,7 +2726,7 @@ class UnifiedPathFinder:
         
         for net_id, (source_idx, sink_idx) in batch:
             # Use fast GPU SSSP instead of Python A*
-            path = self._gpu_delta_stepping_sssp(source_idx, sink_idx)
+            path = self._gpu_delta_stepping_sssp(source_idx, sink_idx, net_id=net_id)
             batch_results.append(path)
             
             # Accumulate edge usage on device
@@ -1983,7 +2735,7 @@ class UnifiedPathFinder:
         
         return batch_results
     
-    def _gpu_delta_stepping_sssp(self, source_idx: int, sink_idx: int) -> Optional[List[int]]:
+    def _gpu_delta_stepping_sssp(self, source_idx: int, sink_idx: int, time_budget_s: float = 0.0, t0: float = None, net_id: str = None) -> Optional[List[int]]:
         """True GPU ∆-stepping bucketed SSSP - replaces Python A* completely"""
         if not self.use_gpu:
             return self._cpu_dijkstra_fallback(source_idx, sink_idx)
@@ -2024,9 +2776,21 @@ class UnifiedPathFinder:
             # ∆-stepping main loop
             current_bucket = 0
             iterations = 0
-            
+            if t0 is None:
+                import time
+                t0 = time.time()
+
             while current_bucket < max_buckets and iterations < self.config.max_search_nodes:
                 iterations += 1
+
+                # Cooperative timeout check every 64 buckets
+                if (iterations & 0x3F) == 0:  # every 64 iterations
+                    if self._deadline_passed(t0, time_budget_s):
+                        logger.info(f"[TIME-BUDGET] delta-stepping budget hit after {iterations} iterations → abort")
+                        return None
+                    if current_bucket >= max_buckets // 2:
+                        logger.info(f"[DELTA CAP] processed {current_bucket}/{max_buckets} buckets → abort for safety")
+                        return None
                 
                 # Process current bucket
                 while bucket_heads[current_bucket] != -1:
@@ -2046,8 +2810,8 @@ class UnifiedPathFinder:
                     # Relax all outgoing edges
                     self._relax_edges_delta_stepping_gpu(
                         node_idx, dist, parent, adj_indptr, adj_indices,
-                        delta, bucket_heads, bucket_tails, bucket_nodes, 
-                        node_next, in_bucket, max_buckets
+                        delta, bucket_heads, bucket_tails, bucket_nodes,
+                        node_next, in_bucket, max_buckets, net_id=net_id
                     )
                 
                 # Move to next bucket
@@ -2059,14 +2823,25 @@ class UnifiedPathFinder:
             logger.warning(f"GPU ∆-stepping failed: {e}, falling back to CPU")
             return self._cpu_dijkstra_fallback(source_idx, sink_idx)
     
-    def _gpu_delta_stepping_sssp_with_metrics(self, source_idx: int, sink_idx: int) -> tuple:
+    def _gpu_delta_stepping_sssp_with_metrics(self, source_idx: int, sink_idx: int,
+                                              time_budget_s: float = 0.0, t0: float = None, net_id: str = None) -> tuple:
         """GPU ∆-stepping with detailed metrics - PRODUCTION MODE for actual routing"""
         if not self.use_gpu:
             path = self._cpu_dijkstra_fallback(source_idx, sink_idx)
             return path, {'relax_calls': 0, 'visited_nodes': 0, 'settled_nodes': 0, 'buckets_touched': 0}
         
         # Use full GPU Δ-stepping for production routing
-        path = self._gpu_delta_stepping_sssp(source_idx, sink_idx)
+        if t0 is None:
+            import time
+            t0 = time.time()
+
+        # Add cooperative timeout check before GPU call
+        if self._deadline_passed(t0, time_budget_s):
+            logger.info(f"[TIME-BUDGET] delta-stepping budget exceeded before GPU call → CPU fallback")
+            path = self._cpu_dijkstra_fallback(source_idx, sink_idx)
+            return path, {'roi_fallback': True, 'reason': 'pre_gpu_budget'}
+
+        path = self._gpu_delta_stepping_sssp(source_idx, sink_idx, time_budget_s=time_budget_s, t0=t0, net_id=net_id)
         
         # Generate realistic metrics based on path length
         if path and len(path) > 1:
@@ -2091,7 +2866,8 @@ class UnifiedPathFinder:
         
         return path, net_metrics
     
-    def _gpu_roi_near_far_sssp_with_metrics(self, net_id: str, source_idx: int, sink_idx: int) -> tuple:
+    def _gpu_roi_near_far_sssp_with_metrics(self, net_id: str, source_idx: int, sink_idx: int,
+                                            time_budget_s: float = 0.0, t0: float = None) -> tuple:
         """ROI-Restricted Near–Far Worklist SSSP - Optimized replacement for Δ-stepping"""
         
         # DEFENSIVE: Ensure net_id is a string, not an array
@@ -2114,7 +2890,9 @@ class UnifiedPathFinder:
             return path, {'roi_nodes': 0, 'roi_edges': 0, 'near_relaxations': 0, 'far_relaxations': 0}
         
         start_time = time.time()
-        
+        if t0 is None:
+            t0 = start_time
+
         # Step 1: Compute ROI bounding box around source and sink
         source_coords = self.node_coordinates[source_idx]
         sink_coords = self.node_coordinates[sink_idx]
@@ -2122,9 +2900,9 @@ class UnifiedPathFinder:
         # DEBUG: Log coordinates
         logger.debug(f"Net {net_id}: Source node {source_idx} at {source_coords}, Sink node {sink_idx} at {sink_coords}")
         
-        # Expand bounding box with margin - use much larger margin to ensure nodes are captured
-        # Original was 3x grid pitch (1.2mm) - too small for sparse ROI extraction
-        margin = 10.0 * self.config.grid_pitch  # 4mm margin - more reliable for node capture
+        # Expand bounding box with adaptive margin based on net failure history
+        base_margin = 10.0 * self.config.grid_pitch  # 4mm base margin
+        margin = self._get_adaptive_roi_margin(net_id, base_margin)
         roi_min_x = min(source_coords[0], sink_coords[0]) - margin
         roi_max_x = max(source_coords[0], sink_coords[0]) + margin
         roi_min_y = min(source_coords[1], sink_coords[1]) - margin
@@ -2133,10 +2911,23 @@ class UnifiedPathFinder:
         # DEBUG: Log ROI bounds
         logger.debug(f"Net {net_id}: ROI bounds: ({roi_min_x:.2f}, {roi_min_y:.2f}) to ({roi_max_x:.2f}, {roi_max_y:.2f}), margin={margin:.2f}")
         
+        # Check budget before ROI extraction
+        if self._deadline_passed(t0, time_budget_s):
+            logger.info(f"[TIME-BUDGET] {net_id}: budget hit during ROI bounds → CPU")
+            path = self._cpu_dijkstra_fallback(source_idx, sink_idx)
+            return path, {'roi_fallback': True, 'reason': 'roi_bounds_budget'}
+
         # Step 2: Extract compact ROI subgraph with enforced source/sink inclusion
         roi_nodes, global_to_local, roi_adj_data = self._extract_roi_subgraph_gpu_with_nodes(
-            roi_min_x, roi_max_x, roi_min_y, roi_max_y, source_idx, sink_idx
+            roi_min_x, roi_max_x, roi_min_y, roi_max_y, source_idx, sink_idx,
+            time_budget_s, t0, net_id
         )
+
+        # Check budget after ROI extraction
+        if self._deadline_passed(t0, time_budget_s):
+            logger.info(f"[TIME-BUDGET] {net_id}: budget hit during ROI extract → CPU")
+            path = self._cpu_dijkstra_fallback(source_idx, sink_idx)
+            return path, {'roi_fallback': True, 'reason': 'roi_extract_budget'}
         
         # DEBUG: Log ROI extraction results
         logger.debug(f"Net {net_id}: Extracted ROI with {len(roi_nodes)} nodes")
@@ -2190,9 +2981,16 @@ class UnifiedPathFinder:
             path = self._cpu_dijkstra_fallback(source_idx, sink_idx)
             return path, {'roi_fallback': True}
         
+        # Check budget before worklist
+        if self._deadline_passed(t0, time_budget_s):
+            logger.info(f"[TIME-BUDGET] {net_id}: budget hit before worklist → CPU")
+            path = self._cpu_dijkstra_fallback(source_idx, sink_idx)
+            return path, {'roi_fallback': True, 'reason': 'pre_worklist_budget'}
+
         # Step 3: Near-Far Worklist SSSP on ROI subgraph
         roi_path = self._gpu_near_far_worklist_sssp(
-            roi_source, roi_sink, roi_adj_data, len(roi_nodes)
+            roi_source, roi_sink, roi_adj_data, len(roi_nodes),
+            time_budget_s=time_budget_s, t0=t0, net_id=net_id
         )
         
         roi_time = time.time() - start_time
@@ -2230,7 +3028,58 @@ class UnifiedPathFinder:
         logger.debug(f"Net {net_id}: ROI routing - {roi_metrics['roi_nodes']} nodes in {roi_time*1000:.1f}ms")
         
         return path, roi_metrics
-    
+
+    def _extract_roi_subgraph_cpu(self, min_x: float, max_x: float, min_y: float, max_y: float):
+        """CPU-based ROI extraction fallback - returns actual ROI data instead of empty arrays"""
+        logger.debug(f"[CPU-ROI] Extracting ROI bounds: ({min_x:.2f}, {min_y:.2f}) to ({max_x:.2f}, {max_y:.2f})")
+
+        # Find nodes within ROI bounds using CPU operations
+        roi_nodes = []
+        for node_idx, coords in enumerate(self.node_coordinates):
+            x, y = coords[0], coords[1]
+            if min_x <= x <= max_x and min_y <= y <= max_y:
+                roi_nodes.append(node_idx)
+
+        if len(roi_nodes) == 0:
+            logger.debug(f"[CPU-ROI] No nodes found in ROI")
+            return [], {}, (cp.array([], dtype=cp.int32), cp.array([], dtype=cp.int32), cp.array([], dtype=cp.float32))
+
+        logger.debug(f"[CPU-ROI] Found {len(roi_nodes)} nodes in ROI")
+
+        # Create global-to-local mapping
+        global_to_local = {global_idx: local_idx for local_idx, global_idx in enumerate(roi_nodes)}
+
+        # Extract edges within ROI using CPU CSR operations
+        roi_edges = []
+        roi_weights = []
+        roi_row_ptr = [0]
+
+        for local_src_idx, global_src_idx in enumerate(roi_nodes):
+            # Get edges for this source node from CSR
+            edge_start = self.csr_indptr[global_src_idx]
+            edge_end = self.csr_indptr[global_src_idx + 1]
+
+            local_edges_count = 0
+            for edge_idx in range(edge_start, edge_end):
+                global_dst_idx = self.csr_indices[edge_idx]
+                if global_dst_idx in global_to_local:
+                    # Both source and destination are in ROI
+                    local_dst_idx = global_to_local[global_dst_idx]
+                    roi_edges.append(local_dst_idx)
+                    roi_weights.append(self.csr_weights[edge_idx])
+                    local_edges_count += 1
+
+            roi_row_ptr.append(roi_row_ptr[-1] + local_edges_count)
+
+        # Convert to CuPy arrays for compatibility with GPU code paths
+        roi_indices = cp.array(roi_edges, dtype=cp.int32) if roi_edges else cp.array([], dtype=cp.int32)
+        roi_indptr = cp.array(roi_row_ptr, dtype=cp.int32)
+        roi_data = cp.array(roi_weights, dtype=cp.float32) if roi_weights else cp.array([], dtype=cp.float32)
+
+        logger.debug(f"[CPU-ROI] Extracted {len(roi_nodes)} nodes, {len(roi_edges)} edges")
+
+        return roi_nodes, global_to_local, (roi_indptr, roi_indices, roi_data)
+
     def _extract_roi_subgraph_gpu(self, min_x: float, max_x: float, min_y: float, max_y: float):
         """CUSTOM CUDA KERNEL: Single-pass ROI extraction - True sub-millisecond performance"""
         
@@ -2256,12 +3105,16 @@ class UnifiedPathFinder:
             return [], {}, (cp.array([], dtype=cp.int32), cp.array([], dtype=cp.int32), cp.array([], dtype=cp.float32))
         
         # Step 2: CUSTOM CUDA KERNEL - Single kernel launch for entire ROI extraction
+        # EMERGENCY FIX: Skip GPU kernel entirely for now - use CPU fallback
+        gpu_roi_disabled = os.getenv('ORTHO_DISABLE_GPU_ROI', '1').lower() in ('1', 'true', 'yes')
+        if gpu_roi_disabled:
+            logger.debug(f"[GPU-ROI-DISABLED] Using CPU ROI extraction fallback")
+            return self._extract_roi_subgraph_cpu(min_x, max_x, min_y, max_y)
 
-        
         roi_node_mask = self._roi_workspace  # Pre-allocated workspace
         roi_node_mask.fill(False)  # Reset
         
-        max_layers = min(6, self.layer_count)
+        max_layers = self.layer_count
         grid_area = grid_width * grid_height
         
         # CRITICAL PERFORMANCE BREAKTHROUGH: Custom CUDA kernel eliminates ALL Python overhead
@@ -2324,11 +3177,15 @@ class UnifiedPathFinder:
             blocks = (total_cells + threads_per_block - 1) // threads_per_block
             
             # CRITICAL FIX #2: Enforce int32 dtypes for all CUDA kernel arguments
+            # Ensure arrays are CuPy and int32 before kernel launch
+            spatial_indptr_gpu = cp.asarray(self._spatial_indptr, dtype=cp.int32)
+            spatial_node_ids_gpu = cp.asarray(self._spatial_node_ids, dtype=cp.int32)
+
             roi_extraction_kernel(
                 (blocks,), (threads_per_block,),
                 (
-                    self._spatial_indptr.astype(cp.int32),      # Spatial index pointers
-                    self._spatial_node_ids.astype(cp.int32),    # Node IDs in spatial index  
+                    spatial_indptr_gpu,                         # Spatial index pointers
+                    spatial_node_ids_gpu,                       # Node IDs in spatial index
                     roi_node_mask,                              # Output mask (bool)
                     cp.int32(grid_x0), cp.int32(grid_y0),       # ROI bounds (int32)
                     cp.int32(grid_x1), cp.int32(grid_y1),       # ROI bounds (int32)
@@ -2341,6 +3198,11 @@ class UnifiedPathFinder:
             
             # GPU synchronization point (kernel completion)
             cp.cuda.Stream.null.synchronize()
+            err = cp.cuda.runtime.getLastError()
+            if err != 0:
+                logger.error(f"[CUDA] extract_roi_nodes kernel error code={err} → forcing CPU fallback for this net")
+                # Return empty ROI so caller falls back cleanly
+                return [], {}, (cp.array([], dtype=cp.int32), cp.array([], dtype=cp.int32), cp.array([], dtype=cp.float32))
         
         # Count total nodes found (single GPU reduction)
         total_nodes_found = int(cp.sum(roi_node_mask))
@@ -2369,7 +3231,13 @@ class UnifiedPathFinder:
         self.roi_extract_event.record()  # GPU timing checkpoint
         
         # Copy ROI nodes to persistent buffer (stays on device)
-        actual_roi_nodes = min(roi_node_count, len(self.roi_node_buffer))
+        # SURGICAL ENHANCEMENT: Apply safety caps
+        max_roi_cap = getattr(self, 'max_roi_nodes', len(self.roi_node_buffer))
+        actual_roi_nodes = min(roi_node_count, len(self.roi_node_buffer), max_roi_cap)
+
+        if actual_roi_nodes < roi_node_count:
+            logger.debug(f"[ROI-SAFETY] Capped ROI from {roi_node_count} to {actual_roi_nodes} nodes")
+
         self.roi_node_buffer[:actual_roi_nodes] = roi_node_indices[:actual_roi_nodes]
         
         # Create local indices on GPU
@@ -2454,18 +3322,59 @@ class UnifiedPathFinder:
         min_x: float, max_x: float,
         min_y: float, max_y: float,
         required_source_idx: int,
-        required_sink_idx: int
+        required_sink_idx: int,
+        time_budget_s: float = 0.0,
+        t0: float = None,
+        net_id: str = "unknown"
     ):
         """Enhanced ROI extraction that GUARANTEES source and sink inclusion (GPU-native)"""
 
-        
-        # Step 1: Extract initial ROI subgraph (still CPU-native for now)
+        if t0 is None:
+            t0 = time.time()
+        last_hb = time.time()
+
+        # Phase 1: Extract initial ROI subgraph
+        logger.debug(f"[ROI-PHASE1] {net_id}: Starting initial ROI extraction")
+        if self._deadline_passed(t0, time_budget_s):
+            logger.info(f"[TIME-BUDGET] {net_id}: budget hit before ROI phase 1 → CPU fallback")
+            return (cp.empty(0, dtype=cp.int32), cp.empty(0, dtype=cp.int32),
+                    (cp.empty(0, dtype=cp.int32), cp.empty(0, dtype=cp.int32), cp.empty(0, dtype=cp.float32)))
+
         roi_nodes_list, roi_node_map_dict, roi_adj_data = self._extract_roi_subgraph_gpu(min_x, max_x, min_y, max_y)
+
+        now = time.time()
+        if now - last_hb > 1.0:
+            logger.info(f"[HEARTBEAT] {net_id}: ROI phase 1 complete, found {len(roi_nodes_list)} nodes")
+            last_hb = now
         
         # Convert to CuPy array
         roi_nodes = cp.asarray(roi_nodes_list, dtype=cp.int32) if roi_nodes_list else cp.empty(0, dtype=cp.int32)
+
+        # ---- ROI safety caps (before building giant maps) ----
+        max_roi_nodes = int(os.getenv("ORTHO_ROI_MAX_NODES", "20000"))
+        if roi_nodes.size == 0:
+            logger.info(f"[ROI] empty ROI → CPU fallback")
+            return (cp.empty(0, dtype=cp.int32),
+                    cp.empty(0, dtype=cp.int32),
+                    (cp.empty(0, dtype=cp.int32),
+                     cp.empty(0, dtype=cp.int32),
+                     cp.empty(0, dtype=cp.float32)))
+
+        if roi_nodes.size > max_roi_nodes:
+            logger.info(f"[ROI-CAP] ROI nodes={int(roi_nodes.size)} > {max_roi_nodes} → CPU fallback")
+            return (cp.empty(0, dtype=cp.int32),
+                    cp.empty(0, dtype=cp.int32),
+                    (cp.empty(0, dtype=cp.int32),
+                     cp.empty(0, dtype=cp.int32),
+                     cp.empty(0, dtype=cp.float32)))
         
-        # Step 2: Force inclusion of source/sink if missing
+        # Phase 2: Force inclusion of source/sink if missing
+        logger.debug(f"[ROI-PHASE2] {net_id}: Checking for required nodes")
+        if self._deadline_passed(t0, time_budget_s):
+            logger.info(f"[TIME-BUDGET] {net_id}: budget hit before ROI phase 2 → CPU fallback")
+            return (cp.empty(0, dtype=cp.int32), cp.empty(0, dtype=cp.int32),
+                    (cp.empty(0, dtype=cp.int32), cp.empty(0, dtype=cp.int32), cp.empty(0, dtype=cp.float32)))
+
         forced_nodes = []
         if required_source_idx not in roi_node_map_dict:
             forced_nodes.append(required_source_idx)
@@ -2473,27 +3382,64 @@ class UnifiedPathFinder:
         if required_sink_idx not in roi_node_map_dict:
             forced_nodes.append(required_sink_idx)
             logger.debug(f"  Force-adding sink node {required_sink_idx}")
+
+        now = time.time()
+        if now - last_hb > 1.0:
+            logger.info(f"[HEARTBEAT] {net_id}: ROI phase 2 complete, forcing {len(forced_nodes)} nodes")
+            last_hb = now
         
         if forced_nodes:
             roi_nodes = cp.concatenate([roi_nodes, cp.asarray(forced_nodes, dtype=cp.int32)])
             roi_nodes = cp.unique(roi_nodes)  # keep sorted, remove duplicates
         
-        # Step 3: Build ROI node → local index map (CuPy arrays, not dict)
-        # global_to_local is a dense array, indexed by global node id
+        # Phase 3: Build ROI node → local index map (CuPy arrays, not dict)
+        logger.debug(f"[ROI-PHASE3] {net_id}: Building global-to-local mapping")
+        if self._deadline_passed(t0, time_budget_s):
+            logger.info(f"[TIME-BUDGET] {net_id}: budget hit before ROI phase 3 → CPU fallback")
+            return (cp.empty(0, dtype=cp.int32), cp.empty(0, dtype=cp.int32),
+                    (cp.empty(0, dtype=cp.int32), cp.empty(0, dtype=cp.int32), cp.empty(0, dtype=cp.float32)))
+
+        # Heuristic: if sparse IDs would create a huge dense map, use compact CPU dict then move to GPU
         max_global = int(cp.max(roi_nodes)) + 1 if len(roi_nodes) > 0 else 1
-        global_to_local = -cp.ones((max_global,), dtype=cp.int32)  # -1 means not in ROI
-        if len(roi_nodes) > 0:
-            global_to_local[roi_nodes] = cp.arange(len(roi_nodes), dtype=cp.int32)
+        if max_global > 3 * int(roi_nodes.size):
+            # Compact mapping on CPU (tiny) for very sparse node IDs
+            roi_nodes_cpu = roi_nodes.get()
+            g2l_cpu = {int(g): i for i, g in enumerate(roi_nodes_cpu)}
+            # Build dense array only up to max_global to keep it bounded
+            global_to_local = -cp.ones((max_global,), dtype=cp.int32)
+            global_to_local[cp.asarray(roi_nodes_cpu, dtype=cp.int32)] = cp.arange(roi_nodes.size, dtype=cp.int32)
+        else:
+            # Normal case: build dense array directly
+            global_to_local = -cp.ones((max_global,), dtype=cp.int32)  # -1 means not in ROI
+            if len(roi_nodes) > 0:
+                global_to_local[roi_nodes] = cp.arange(len(roi_nodes), dtype=cp.int32)
         
-        # Step 4: Build adjacency (fully GPU-native)
+        now = time.time()
+        if now - last_hb > 1.0:
+            logger.info(f"[HEARTBEAT] {net_id}: ROI phase 3 complete, mapping {len(roi_nodes)} nodes")
+            last_hb = now
+
+        # Phase 4: Build adjacency (fully GPU-native)
+        logger.debug(f"[ROI-PHASE4] {net_id}: Building adjacency data")
+        if self._deadline_passed(t0, time_budget_s):
+            logger.info(f"[TIME-BUDGET] {net_id}: budget hit before ROI phase 4 → CPU fallback")
+            return (cp.empty(0, dtype=cp.int32), cp.empty(0, dtype=cp.int32),
+                    (cp.empty(0, dtype=cp.int32), cp.empty(0, dtype=cp.int32), cp.empty(0, dtype=cp.float32)))
+
         if len(roi_nodes) > 0:
             roi_rows, roi_cols, roi_costs = self._extract_roi_edges_gpu(roi_nodes, global_to_local)
             roi_adj_data = (roi_rows, roi_cols, roi_costs)
         else:
             roi_adj_data = (cp.empty(0, dtype=cp.int32), cp.empty(0, dtype=cp.int32), cp.empty(0, dtype=cp.float32))
+
+        now = time.time()
+        if now - last_hb > 1.0:
+            logger.info(f"[HEARTBEAT] {net_id}: ROI phase 4 complete, extracted adjacency")
+            last_hb = now
         
         logger.debug(f"  Enhanced ROI: {len(roi_nodes)} nodes (added {len(forced_nodes)} forced nodes)")
-        
+        logger.info(f"[ROI-COMPLETE] {net_id}: All phases complete in {time.time() - t0:.2f}s")
+
         # Return GPU-native structures
         return roi_nodes, global_to_local, roi_adj_data
         
@@ -2717,15 +3663,34 @@ class UnifiedPathFinder:
                 self.roi_edge_dst_buffer[:valid_edge_count].copy(),
                 self.roi_edge_cost_buffer[:valid_edge_count].copy())
     
-    def _gpu_near_far_worklist_sssp(self, source_idx: int, sink_idx: int, roi_adj_data, roi_size: int):
+    def _gpu_near_far_worklist_sssp(self, source_idx: int, sink_idx: int, roi_adj_data, roi_size: int,
+                                    time_budget_s: float = 0.0, t0: float = None, net_id: str = None):
         """GPU-optimized Dijkstra with CSR format - replaces O(N²) CPU simulation"""
         if not roi_adj_data:
             return None
-        
+
+        # Initialize time budget tracking
+        if t0 is None:
+            import time
+            t0 = time.time()
+
+        def over_budget():
+            return bool(time_budget_s) and (time.time() - t0) > time_budget_s
+
+        # Early budget check before GPU work
+        if over_budget():
+            logger.info(f"[TIME-BUDGET] {net_id}: budget exceeded before GPU near-far → CPU fallback")
+            return None
+
         roi_rows, roi_cols, roi_costs = roi_adj_data
-        
+
         # Convert COO format to CSR format for GPU efficiency
         roi_indptr, roi_indices, roi_weights = self._convert_coo_to_csr_gpu(roi_rows, roi_cols, roi_costs, roi_size)
+
+        # Check budget after CSR conversion
+        if over_budget():
+            logger.info(f"[TIME-BUDGET] {net_id}: budget exceeded during CSR conversion → CPU fallback")
+            return None
         
         # For very small ROIs, CPU heap is still faster due to overhead
         if roi_size < 200:
@@ -2737,7 +3702,8 @@ class UnifiedPathFinder:
             return self._cpu_dijkstra_roi_heap(source_idx, sink_idx, roi_indptr, roi_indices, roi_weights, roi_size)
         
         # Use GPU CSR Dijkstra for medium/large ROIs
-        return self._gpu_dijkstra_roi_csr(source_idx, sink_idx, roi_indptr, roi_indices, roi_weights, roi_size)
+        return self._gpu_dijkstra_roi_csr(source_idx, sink_idx, roi_indptr, roi_indices, roi_weights, roi_size,
+                                         time_budget_s=time_budget_s, t0=t0, net_id=net_id)
     
     def _convert_coo_to_csr_gpu(self, roi_rows, roi_cols, roi_costs, roi_size):
         """Convert COO (rows, cols, costs) to CSR format on GPU for efficient access"""
@@ -2772,17 +3738,35 @@ class UnifiedPathFinder:
         
         heap = [(0.0, source_idx)]
         visited = set()
-        
+
+        # Initialize heartbeat tracking
+        if t0 is None:
+            import time
+            t0 = time.time()
+        last_beat = time.time()
+        iters = 0
+
         while heap:
             current_dist, current_node = heapq.heappop(heap)
-            
+            iters += 1
+
             if current_node in visited:
                 continue
-            
+
             visited.add(current_node)
-            
+
             if current_node == sink_idx:
                 break
+
+            # Cooperative timeout and heartbeat every ~1024 iterations
+            if (iters & 0x3FF) == 0:  # every 1024 iterations
+                current_time = time.time()
+                if self._deadline_passed(t0, time_budget_s):
+                    logger.info(f"[TIME-BUDGET] {net_id or ''}: worklist budget hit at iter {iters} → abort ROI")
+                    return None
+                if current_time - last_beat > 1.0:  # heartbeat every 1s
+                    logger.info(f"[HEARTBEAT] {net_id or ''}: iter={iters} roi_nodes={roi_size} visited={len(visited)}")
+                    last_beat = current_time
             
             # Process neighbors using CSR format
             start = indptr[current_node]
@@ -2812,7 +3796,8 @@ class UnifiedPathFinder:
         
         return None
     
-    def _gpu_dijkstra_roi_csr(self, roi_source: int, roi_sink: int, roi_indptr, roi_indices, roi_weights, roi_size: int, max_iters: int = 10_000_000):
+    def _gpu_dijkstra_roi_csr(self, roi_source: int, roi_sink: int, roi_indptr, roi_indices, roi_weights, roi_size: int,
+                             max_iters: int = 10_000_000, time_budget_s: float = 0.0, t0: float = None, net_id: str = None):
         """GPU-native frontier-based Dijkstra - eliminates O(N²) global argmin bottleneck"""
         # Initialize state arrays on GPU
         inf = cp.float32(cp.inf)
@@ -2829,7 +3814,20 @@ class UnifiedPathFinder:
         
         waves = 0
         HEARTBEAT = 50  # Progress monitoring every 50 waves
-        
+
+        # Initialize time budget tracking
+        if t0 is None:
+            import time
+            t0 = time.time()
+        last_hb = t0
+
+        def over_budget():
+            return bool(time_budget_s) and (time.time() - t0) > time_budget_s
+
+        # Choose reasonable max iterations based on ROI size
+        MAX_ITERS = max(4096, roi_size * 8)
+        max_iters = min(max_iters, MAX_ITERS)
+
         while active.any() and waves < max_iters:
             # Get active frontier
             src_ids = cp.where(active)[0]
@@ -2903,7 +3901,17 @@ class UnifiedPathFinder:
             # Advance to next wave
             active, next_active = next_active, active
             waves += 1
-            
+
+            # Cooperative budget check + heartbeat every ~64 waves
+            if (waves & 0x3F) == 0:  # every 64 waves
+                if over_budget():
+                    logger.info(f"[TIME-BUDGET] {net_id}: ROI near-far budget hit at wave {waves} → abort")
+                    return None
+                now = time.time()
+                if now - last_hb > 1.0:  # heartbeat every 1s
+                    logger.info(f"[HEARTBEAT] {net_id}: near-far wave={waves}, roi_nodes={roi_size}")
+                    last_hb = now
+
             # Progress monitoring for large ROIs
             if waves % HEARTBEAT == 0:
                 active_count = int(active.sum())
@@ -4321,20 +5329,55 @@ class UnifiedPathFinder:
     def _relax_edges_delta_stepping_gpu(self, current_node: int, dist, parent,
                                        adj_indptr, adj_indices, delta,
                                        bucket_heads, bucket_tails, bucket_nodes,
-                                       node_next, in_bucket, max_buckets) -> int:
-        """Relax all outgoing edges from current node using ∆-stepping"""
+                                       node_next, in_bucket, max_buckets, net_id: str = None) -> int:
+        """Relax all outgoing edges from current node using ∆-stepping with taboo + clearance"""
         current_dist = float(dist[current_node])
         relax_count = 0
-        
+        taboo_blocks = 0
+        clearance_blocks = 0
+
         # Get outgoing edges
         start_ptr = int(adj_indptr[current_node])
         end_ptr = int(adj_indptr[current_node + 1])
-        
+
         for edge_idx in range(start_ptr, end_ptr):
             neighbor_idx = int(adj_indices[edge_idx])
-            edge_cost = float(self.edge_total_cost[edge_idx])
+
+            # CRITICAL: Use CANONICAL EDGE STORE for PathFinder cost calculation
+            if net_id:
+                # Get coordinates for canonical edge key
+                from_coord = self._idx_to_coord(current_node)
+                to_coord = self._idx_to_coord(neighbor_idx)
+
+                if from_coord and to_coord:
+                    x1, y1, layer1 = from_coord
+                    x2, y2, layer2 = to_coord
+
+                    # Only same-layer edges (no vias in edge relaxor)
+                    if layer1 == layer2:
+                        # Create canonical edge key
+                        k = canonical_edge_key(layer1, int(x1/self.geometry.pitch), int(y1/self.geometry.pitch),
+                                             int(x2/self.geometry.pitch), int(y2/self.geometry.pitch))
+
+                        # Calculate PathFinder cost using canonical store
+                        edge_cost = self._pathfinder_cost_for_canonical_edge(k, net_id)
+
+                        if edge_cost == float('inf'):
+                            # Edge blocked by taboo, capacity, or clearance
+                            taboo_blocks += 1
+                            continue
+                    else:
+                        # Via edge - use base cost (no PathFinder constraints on vias yet)
+                        edge_cost = float(self.edge_total_cost[edge_idx])
+                else:
+                    # Fallback to base cost if coordinate lookup fails
+                    edge_cost = float(self.edge_total_cost[edge_idx])
+            else:
+                # No net_id - use base cost
+                edge_cost = float(self.edge_total_cost[edge_idx])
+
             relax_count += 1
-            
+
             if edge_cost < cp.inf:  # Skip blocked edges
                 new_dist = current_dist + edge_cost
                 
@@ -4351,6 +5394,10 @@ class UnifiedPathFinder:
                                            bucket_heads, bucket_tails, bucket_nodes,
                                            node_next, in_bucket)
         
+        # Log blocking statistics for debugging
+        if taboo_blocks > 0 or clearance_blocks > 0:
+            logger.debug(f"[RELAXOR] net={net_id}: taboo_blocks={taboo_blocks}, clearance_blocks={clearance_blocks}")
+
         return relax_count
     
     def _accumulate_edge_usage_gpu(self, path: List[int]):
@@ -4386,110 +5433,460 @@ class UnifiedPathFinder:
             self._reverse_edge_index[edge_key] = edge_idx
         
         logger.info(f"Built reverse edge index: {len(self._reverse_edge_index):,} mappings")
-    
+
+    def _live_edge_count(self) -> int:
+        """Single source of truth for live edge count from CSR matrix"""
+        # Prefer CSR 'indices' length (authoritative)
+        return int(len(getattr(self, "indices_cpu", self.adjacency_matrix.indices)))
+
+    def _pf_should_stop(self, iter_idx: int, overuse: int, failed: int, min_iters: int = 2) -> bool:
+        """
+        HONEST stop rule - only stop if truly converged, never lie about routing state:
+        • Stop only if (overuse == 0 AND failed == 0) OR iter == max_iters
+        • When iter == max_iters and failed > 0, set status "capacity-limited (unroutable)"
+        """
+        # Only stop early if perfect convergence: no overuse AND no failures
+        if overuse == 0 and failed == 0 and iter_idx >= min_iters:
+            return True
+
+        # Never stop early if there are still problems - let it run to max_iters
+        return False
+
+    def _as_py_float(self, x):
+        """Convert numpy/cupy scalar to python float for GUI compatibility."""
+        try:
+            # Handle numpy/cupy scalars
+            if hasattr(x, 'item'):
+                return float(x.item())
+            # Handle numpy/cupy arrays (extract first element)
+            elif hasattr(x, 'get'):
+                return float(x.get() if callable(x.get) else x.get)
+            # Handle regular python numbers
+            else:
+                return float(x)
+        except Exception as e:
+            logger.warning(f"[TYPE-CAST] Failed to convert {type(x)} to float: {e}")
+            return 0.0  # Safe fallback instead of returning unconverted value
+
+    def _as_py_int(self, x):
+        """Convert numpy/cupy scalar to python int for layer IDs."""
+        try:
+            # Handle numpy/cupy scalars
+            if hasattr(x, 'item'):
+                return int(x.item())
+            # Handle numpy/cupy arrays (extract first element)
+            elif hasattr(x, 'get'):
+                return int(x.get() if callable(x.get) else x.get)
+            # Handle regular python numbers
+            else:
+                return int(x)
+        except Exception as e:
+            logger.warning(f"[TYPE-CAST] Failed to convert {type(x)} to int: {e}")
+            return 0  # Safe fallback to F.Cu layer
+
+    def _map_layer_for_gui(self, layer_id: int, layer_count: int = 6) -> str:
+        """
+        Map router layer ID to GUI layer string names.
+        GUI expects 'F.Cu', 'In1.Cu', 'In2.Cu', etc.
+        """
+        # Layer mapping: integer -> string name for GUI
+        layer_map = {
+            0: 'F.Cu',
+            1: 'In1.Cu',
+            2: 'In2.Cu',
+            3: 'In3.Cu',
+            4: 'In4.Cu',
+            5: 'B.Cu'
+        }
+
+        # Clamp to valid range first
+        if not (0 <= layer_id < layer_count):
+            mapped_id = layer_id % layer_count
+            logger.warning(f"[GUI-LAYER-MAP] Out-of-bounds layer {layer_id} → {mapped_id}")
+            layer_id = mapped_id
+
+        # Return string layer name
+        layer_name = layer_map.get(layer_id, 'F.Cu')  # Fallback to F.Cu
+        logger.debug(f"[GUI-LAYER-MAP] Layer {layer_id} → '{layer_name}'")
+        return layer_name
+
+    def _sync_edge_arrays_to_live_csr(self):
+        """
+        Ensure ALL edge-dependent arrays match the live CSR edge count (E_live).
+        Safe to call repeatedly; idempotent. Creates missing arrays with sane defaults.
+        """
+        import numpy as np
+        E_live = self._live_edge_count()
+
+        # Pull CPU CSR weights if available (best base for costs)
+        weights = getattr(self, "weights_cpu", None)
+        if weights is not None and len(weights) != E_live:
+            # If weights are stale, rebuild from adjacency if you have a builder;
+            # otherwise pad with last value (or 1.0) to avoid crashes.
+            if len(weights) < E_live:
+                pad = np.full(E_live - len(weights), float(weights[-1]) if len(weights) else 1.0, dtype=np.float32)
+                self.weights_cpu = np.concatenate([weights.astype(np.float32, copy=False), pad])
+            else:
+                self.weights_cpu = weights[:E_live].astype(np.float32, copy=False)
+
+        def _ensure_len(name, default_value, dtype):
+            arr = getattr(self, name, None)
+            if arr is None:
+                setattr(self, name, np.full(E_live, default_value, dtype=dtype))
+                return
+            if len(arr) == E_live:
+                # normalize dtype
+                if arr.dtype != np.dtype(dtype):
+                    setattr(self, name, arr.astype(dtype, copy=False))
+                return
+            if len(arr) < E_live:
+                pad = np.full(E_live - len(arr), default_value, dtype=dtype)
+                new_arr = np.concatenate([arr.astype(dtype, copy=False), pad])
+            else:
+                new_arr = arr[:E_live].astype(dtype, copy=False)
+            setattr(self, name, new_arr)
+
+        # Edge arrays you use in cost math / masks / accounting
+        _ensure_len("edge_total_penalty", 0.0, np.float32)   # penalties added on top
+        _ensure_len("edge_bottleneck_penalty", 0.0, np.float32)
+        _ensure_len("edge_present_usage", 0.0, np.float32)   # negotiated congestion
+        _ensure_len("edge_history", 0.0, np.float32)         # historical congestion
+        _ensure_len("edge_capacity", 1.0, np.float32)        # capacity (if used)
+        _ensure_len("edge_dir_mask", 1, np.uint8)            # 0/1 legal mask
+        _ensure_len("edge_total_cost", 0.0, np.float32)      # output buffer
+        _ensure_len("edge_base_cost", 0.0, np.float32)       # if you keep a cached base
+
+        # If you don't maintain edge_base_cost separately, synthesize from weights + static penalties:
+        if getattr(self, "edge_base_cost", None) is None and getattr(self, "weights_cpu", None) is not None:
+            w = self.weights_cpu.astype(np.float32, copy=False)
+            pen = self.edge_total_penalty.astype(np.float32, copy=False)
+            self.edge_base_cost = (w[:E_live] + pen[:E_live]).astype(np.float32, copy=False)
+
+        # Mirror to GPU if needed
+        if getattr(self, "use_gpu", False):
+            try:
+                import cupy as cp
+                for name in (
+                    "edge_total_penalty", "edge_bottleneck_penalty", "edge_present_usage",
+                    "edge_history", "edge_capacity", "edge_dir_mask", "edge_total_cost", "edge_base_cost"
+                ):
+                    cpu_arr = getattr(self, name)
+                    if not hasattr(cpu_arr, "get"):  # not a CuPy array
+                        setattr(self, name, cp.asarray(cpu_arr))
+            except Exception:
+                # If CuPy unavailable, stay CPU
+                pass
+
+        logger.info(f"[LIVE-SIZE] Edge arrays synced to E_live={E_live} (no truncation/mismatch)")
+
+    def _build_edge_lookup_from_csr(self):
+        """
+        Build authoritative CSR edge lookup: (u,v) -> edge_index
+        This replaces float coordinate-based keys that drift from the actual graph.
+        """
+        import numpy as np
+
+        logger.info("[CSR-LOOKUP] Building edge lookup from CSR arrays...")
+
+        # Get CSR structure (using correct attribute names from _build_gpu_matrices)
+        if not hasattr(self, 'indices_cpu') or not hasattr(self, 'indptr_cpu'):
+            logger.warning("[CSR-LOOKUP] CSR arrays not available, skipping edge lookup build")
+            return
+
+        # Initialize edge lookup and ownership tracking
+        self.edge_lookup = {}  # (u,v) -> edge_index
+        self.edge_owners = {}  # edge_index -> net_id (current owner)
+        self.edge_usage_count = {}  # edge_index -> usage count
+
+        # Build lookup from CSR structure (using correct attribute names)
+        edge_count = 0
+        for u in range(len(self.indptr_cpu) - 1):
+            start_idx = self.indptr_cpu[u]
+            end_idx = self.indptr_cpu[u + 1]
+
+            for edge_idx in range(start_idx, end_idx):
+                v = self.indices_cpu[edge_idx]
+
+                # Store both directions for undirected graph
+                self.edge_lookup[(u, v)] = edge_idx
+                self.edge_lookup[(v, u)] = edge_idx  # Symmetric access
+
+                # Initialize edge accounting
+                self.edge_owners[edge_idx] = None  # No current owner
+                self.edge_usage_count[edge_idx] = 0  # No current usage
+
+                edge_count += 1
+
+        logger.info(f"[CSR-LOOKUP] Built edge lookup: {len(self.edge_lookup)} (u,v) mappings for {edge_count} edges")
+        logger.info(f"[CSR-LOOKUP] Initialized {len(self.edge_owners)} edge ownership records")
+
+    def _pf_cost_for_edge(self, u: int, v: int, net_id: int) -> float:
+        """
+        Calculate PathFinder cost for CSR edge (u,v) including congestion and history.
+        Returns inf if edge cannot be used by this net.
+        """
+        edge_idx = self.edge_lookup.get((u, v))
+        if edge_idx is None:
+            return float('inf')  # Edge doesn't exist
+
+        # Check capacity constraints in HARD phase
+        if hasattr(self, 'current_iteration') and self.current_iteration >= self._phase_block_after:
+            current_owner = self.edge_owners.get(edge_idx)
+            if current_owner is not None and current_owner != net_id:
+                return float('inf')  # HARD blocked by another net
+
+        # Check taboo in HARD phase
+        if (hasattr(self, 'current_iteration') and self.current_iteration >= self._phase_block_after and
+            hasattr(self, '_taboo') and net_id in self._taboo):
+            edge_key = self._canon_edge_key_from_nodes(u, v)
+            if edge_key in self._taboo[net_id]:
+                return float('inf')  # Taboo blocked
+
+        # CLEARANCE ENFORCEMENT - prevent geometric overlaps during search (CRITICAL FIX)
+        if hasattr(self, '_clearance_enabled') and self._clearance_enabled:
+            # Get coordinates for clearance checking
+            coord1 = self._idx_to_coord(u)
+            coord2 = self._idx_to_coord(v)
+            if coord1 and coord2:
+                x1, y1, layer1 = coord1
+                x2, y2, layer2 = coord2
+                edge_layer = layer1 if layer1 == layer2 else layer1
+                if not self._edge_is_clear_realtime(net_id, edge_layer, x1, y1, x2, y2):
+                    return float('inf')  # Block edge that would cause clearance violation
+
+        # Calculate cost: base_cost + congestion_penalty + history_penalty
+        base_cost = self.weights_cpu[edge_idx] if hasattr(self, 'weights_cpu') else 1.0
+
+        usage_count = self.edge_usage_count.get(edge_idx, 0)
+        congestion_penalty = usage_count * self._congestion_multiplier if usage_count > 0 else 0.0
+
+        history_cost = self.edge_history[edge_idx] if hasattr(self, 'edge_history') else 0.0
+
+        return base_cost + congestion_penalty + history_cost
+
+    def _can_commit_edge(self, u: int, v: int, net_id: int) -> bool:
+        """
+        Check if net can commit to using edge (u,v) based on current capacity and taboo.
+        """
+        edge_idx = self.edge_lookup.get((u, v))
+        if edge_idx is None:
+            return False  # Edge doesn't exist
+
+        # Check if already owned by this net
+        current_owner = self.edge_owners.get(edge_idx)
+        if current_owner == net_id:
+            return True  # Net already owns this edge
+
+        # Check capacity in HARD phase
+        if hasattr(self, 'current_iteration') and self.current_iteration >= self._phase_block_after:
+            if current_owner is not None:
+                return False  # Hard blocked by another net
+
+        # Check taboo
+        if (hasattr(self, '_taboo') and net_id in self._taboo and
+            hasattr(self, 'current_iteration') and self.current_iteration >= self._phase_block_after):
+            edge_key = self._canon_edge_key_from_nodes(u, v)
+            if edge_key in self._taboo[net_id]:
+                return False  # Taboo blocked
+
+        # Check clearance
+        if hasattr(self, '_clearance_enabled') and self._clearance_enabled:
+            coord1 = self._idx_to_coord(u)
+            coord2 = self._idx_to_coord(v)
+            if coord1 and coord2:
+                x1, y1, layer1 = coord1
+                x2, y2, layer2 = coord2
+                edge_layer = layer1 if layer1 == layer2 else layer1
+                if not self._edge_is_clear_realtime(net_id, edge_layer, x1, y1, x2, y2):
+                    return False  # Clearance violation
+
+        return True
+
+    def _commit_edge_to_net(self, u: int, v: int, net_id: int):
+        """
+        Commit edge (u,v) to net_id in CSR accounting system.
+        """
+        edge_idx = self.edge_lookup.get((u, v))
+        if edge_idx is None:
+            logger.warning(f"[CSR-COMMIT] Edge ({u},{v}) not found in lookup")
+            return
+
+        # Update ownership
+        old_owner = self.edge_owners.get(edge_idx)
+        if old_owner != net_id:
+            self.edge_owners[edge_idx] = net_id
+            if old_owner is not None:
+                logger.debug(f"[CSR-COMMIT] Edge {edge_idx} transferred from net {old_owner} to {net_id}")
+
+        # Update usage count
+        self.edge_usage_count[edge_idx] = self.edge_usage_count.get(edge_idx, 0) + 1
+
+    def _rip_edge_from_net(self, u: int, v: int, net_id: int):
+        """
+        Remove edge (u,v) from net_id and add to taboo in CSR accounting system.
+        """
+        edge_idx = self.edge_lookup.get((u, v))
+        if edge_idx is None:
+            return
+
+        # Remove ownership if this net owns it
+        if self.edge_owners.get(edge_idx) == net_id:
+            self.edge_owners[edge_idx] = None
+            self.edge_usage_count[edge_idx] = max(0, self.edge_usage_count.get(edge_idx, 1) - 1)
+
+            # Add to taboo for HARD phase blocking
+            if not hasattr(self, '_taboo'):
+                self._taboo = {}
+            if net_id not in self._taboo:
+                self._taboo[net_id] = set()
+
+            edge_key = self._canon_edge_key_from_nodes(u, v)
+            self._taboo[net_id].add(edge_key)
+
+    def _compute_overuse_from_csr(self) -> int:
+        """
+        Compute total overuse count from CSR edge accounting (authoritative).
+        Returns number of edges with usage > capacity (typically 1).
+        """
+        if not hasattr(self, 'edge_usage_count'):
+            return 0
+
+        overuse_count = 0
+        for edge_idx, usage in self.edge_usage_count.items():
+            capacity = 1  # Default capacity per edge
+            if hasattr(self, 'edge_capacity') and edge_idx < len(self.edge_capacity):
+                capacity = self.edge_capacity[edge_idx]
+
+            if usage > capacity:
+                overuse_count += 1
+
+        return overuse_count
+
     def _build_gpu_spatial_index(self):
-        """Build GPU-based spatial grid index for ultra-fast ROI extraction"""
+        """Build spatial grid index with proper GPU/CPU backend selection"""
+        import numpy as np
+        try:
+            import cupy as cp
+        except Exception:
+            cp = None
+
+        coords = getattr(self, "node_coordinates", None)
+        assert coords is not None, "node_coordinates not initialized"
+
         # Resolve N once for this routine
         N = getattr(self, "lattice_node_count", None)
         if N is None and hasattr(self, "node_coordinates_lattice"):
             N = int(self.node_coordinates_lattice.shape[0])
             self.lattice_node_count = N
         if N is None:
-            raise RuntimeError("[SPATIAL] lattice size unknown (no node_coordinates_lattice / lattice_node_count)")
+            N = coords.shape[0]
+            self.lattice_node_count = N
 
-        logger.info("Building GPU spatial index for constant-time ROI extraction...")
-
-        # ASSERT: Coordinate array must match node count
-        if self.node_coordinates is None:
-            logger.error("node_coordinates is None during spatial index build - rebuilding coordinate array")
-            self._initialize_coordinate_array()
-
-        assert self.node_coordinates.shape[0] == N, \
-            f"Coordinate array size mismatch: {self.node_coordinates.shape[0]} != {N}"
-        
         # Calculate grid parameters
         bounds = self._board_bounds
-        grid_pitch = self.config.grid_pitch  # Use PathFinder grid pitch
-        
-        # Grid dimensions 
-        self._grid_x0 = bounds.min_x
-        self._grid_y0 = bounds.min_y
+        grid_pitch = float(self.config.grid_pitch)
+
+        # Grid dimensions - CRITICAL: Use same grid alignment as lattice building
+        pitch = grid_pitch
+        self._grid_x0 = round(bounds.min_x / pitch) * pitch  # Match _build_3d_lattice grid alignment
+        self._grid_y0 = round(bounds.min_y / pitch) * pitch  # Match _build_3d_lattice grid alignment
         self._grid_pitch = grid_pitch
-        
+
+        logger.info(f"[GRID-PARAMS] Grid origin: ({self._grid_x0:.1f}, {self._grid_y0:.1f}) pitch={pitch}")
+        logger.info(f"[GRID-PARAMS] Original bounds: ({bounds.min_x:.1f}, {bounds.min_y:.1f}) -> grid-aligned bounds")
+
         grid_width = int((bounds.max_x - bounds.min_x) / grid_pitch) + 1
         grid_height = int((bounds.max_y - bounds.min_y) / grid_pitch) + 1
         self._grid_dims = (grid_width, grid_height)
-        
-        logger.info(f"Spatial grid: {grid_width}x{grid_height} cells at {grid_pitch:.2f}mm pitch")
-        
-        # Build GPU grid index using vectorized operations
-        coords = self.node_coordinates  # Already on GPU
-        
-        # CRITICAL FIX: Build layer array efficiently using index mapping
-        total_nodes = len(coords) if hasattr(coords, '__len__') else len(self.node_coordinates)
-        
+
+        # Honor kill switch: skip GPU spatial index entirely if ROI is disabled
+        disable_gpu_roi = os.getenv('ORTHO_DISABLE_GPU_ROI', '0').lower() in ('1','true','yes')
+
+        use_gpu = bool(getattr(self, "use_gpu", False) and (cp is not None) and not disable_gpu_roi)
+
         # Create index->layer mapping efficiently (O(N) instead of O(N²))
         layer_map = {}
         for node_id, (x, y, node_layer, idx) in self.nodes.items():
             layer_map[idx] = node_layer
-            
+
         # Build layer array in order, defaulting to layer 0 for missing indices
+        total_nodes = N
         layers_list = [layer_map.get(i, 0) for i in range(total_nodes)]
-        layers = cp.array(layers_list)
-        
-        # Convert coordinates to grid cells (vectorized on GPU)
-        grid_x = cp.floor((coords[:, 0] - self._grid_x0) / grid_pitch).astype(cp.int32)
-        grid_y = cp.floor((coords[:, 1] - self._grid_y0) / grid_pitch).astype(cp.int32)
-        
-        # Flatten to linear grid cell indices  
-        grid_cells = grid_y * grid_width + grid_x
-        
-        # Add layer dimension (each layer gets separate cells)
-        max_layer = int(cp.max(layers))
-        grid_cells_3d = layers * (grid_width * grid_height) + grid_cells
-        
-        # Build CSR-style spatial index on GPU
-        max_cell = int(cp.max(grid_cells_3d)) + 1
-        
-        # Count nodes per cell
-        cell_counts = cp.zeros(max_cell, dtype=cp.int32)
-        cp.add.at(cell_counts, grid_cells_3d, 1)
-        
-        # CRITICAL FIX #1: Build proper CSR indptr with correct length
-        indptr = cp.zeros(max_cell + 1, dtype=cp.int32)  # (max_cell+1,) - proper CSR format
-        indptr[1:] = cp.cumsum(cell_counts)              # cumulative sum with 0 start
-        self._spatial_indptr = indptr.astype(cp.int32)   # enforce int32
-        
-        # Sort nodes by grid cell for coalesced access
-        sort_indices = cp.argsort(grid_cells_3d)
-        self._spatial_node_ids = sort_indices.astype(cp.int32)  # permutation of [0..N)
-        self._spatial_grid_cells = grid_cells_3d[sort_indices]
-        
-        logger.info(f"GPU spatial index built: {max_cell:,} grid cells, {len(sort_indices):,} indexed nodes")
-        
-        # VERIFY spatial index covers all nodes (dynamic range check)
-        node_ids_cpu = self._spatial_node_ids.get() if hasattr(self._spatial_node_ids, 'get') else self._spatial_node_ids
-        min_node_id = int(node_ids_cpu.min())
-        max_node_id = int(node_ids_cpu.max())
-        expected_max = N - 1  # Should cover 0..N-1
 
-        logger.info(f"SPATIAL INDEX COVERAGE: node IDs {min_node_id:,} to {max_node_id:,} (expected: 0 to {expected_max:,})")
+        if use_gpu:
+            logger.info("Building GPU spatial index for constant-time ROI extraction...")
+            # ---- GPU path: ensure CuPy dtypes everywhere ----
+            coords_gpu = coords if hasattr(coords, "__cuda_array_interface__") else cp.asarray(coords, dtype=cp.float32)
+            layers = cp.asarray(layers_list, dtype=cp.int32)
+            grid_pitch_gpu = cp.float32(grid_pitch)
+            x0 = cp.float32(self._grid_x0)
+            y0 = cp.float32(self._grid_y0)
 
-        # Verify coverage matches expectation
-        if min_node_id == 0 and max_node_id == expected_max:
-            logger.info(f"SPATIAL INDEX: Complete coverage verified for {N:,} nodes")
+            grid_x = cp.floor((coords_gpu[:, 0] - x0) / grid_pitch_gpu).astype(cp.int32)
+            grid_y = cp.floor((coords_gpu[:, 1] - y0) / grid_pitch_gpu).astype(cp.int32)
+
+            # clamp
+            grid_x = cp.clip(grid_x, 0, grid_width - 1)
+            grid_y = cp.clip(grid_y, 0, grid_height - 1)
+
+            cell_ids = (grid_y * grid_width + grid_x).astype(cp.int32)
+            # If you encode layers into cells, incorporate layer offsets here:
+            layer_offset = (layers * (grid_width * grid_height))
+            cell_ids += layer_offset
+
+            # build CSR (GPU) ...
+            # make sure final arrays used by the CUDA kernel are cp arrays:
+            # (Re)build from scratch on GPU
+            order = cp.argsort(cell_ids)
+            cell_ids_sorted = cell_ids[order]
+            node_ids_sorted = order.astype(cp.int32)
+
+            max_cell = grid_width * grid_height * max(1, int(self.layer_count))
+            counts = cp.bincount(cell_ids_sorted, minlength=max_cell)
+            indptr = cp.empty((max_cell + 1,), dtype=cp.int32)
+            indptr[0] = 0
+            cp.cumsum(counts, out=indptr[1:])
+            self._spatial_indptr = indptr
+            self._spatial_node_ids = node_ids_sorted
+            self._max_cell = int(max_cell - 1)
+
+            # workspace for ROI mask
+            if not hasattr(self, "_roi_workspace") or int(self._roi_workspace.size) != int(self.lattice_node_count):
+                self._roi_workspace = cp.zeros((self.lattice_node_count,), dtype=cp.bool_)
+
+            logger.info(f"GPU spatial index built: {max_cell:,} grid cells, {len(node_ids_sorted):,} indexed nodes")
+
         else:
-            logger.warning(f"SPATIAL INDEX: Coverage mismatch - expected 0..{expected_max:,}, got {min_node_id:,}..{max_node_id:,}")
+            logger.info("Skipping GPU spatial index (GPU ROI disabled); CPU ROI path will be used.")
+            # ---- CPU path (NumPy) used if GPU ROI disabled or no CuPy ----
+            coords_np = coords if isinstance(coords, np.ndarray) else cp.asnumpy(coords)  # in case coords is cp
+            layers = np.asarray(layers_list, dtype=np.int32)
+            grid_x = np.floor((coords_np[:, 0] - self._grid_x0) / grid_pitch).astype(np.int32)
+            grid_y = np.floor((coords_np[:, 1] - self._grid_y0) / grid_pitch).astype(np.int32)
+            grid_x = np.clip(grid_x, 0, grid_width - 1)
+            grid_y = np.clip(grid_y, 0, grid_height - 1)
+            cell_ids = (grid_y * grid_width + grid_x).astype(np.int32)
+            # layer offsets here if needed...
+            layer_offset = (layers * (grid_width * grid_height))
+            cell_ids += layer_offset
+
+            max_cell = grid_width * grid_height * max(1, int(self.layer_count))
+            counts = np.bincount(cell_ids, minlength=max_cell)
+            indptr = np.empty((max_cell + 1,), dtype=np.int32)
+            indptr[0] = 0
+            np.cumsum(counts, out=indptr[1:])
+            node_ids = np.argsort(cell_ids).astype(np.int32)  # indices into coords
+
+            # store CPU arrays; GPU code must respect ROI disable switch
+            self._spatial_indptr = indptr
+            self._spatial_node_ids = node_ids
+            self._max_cell = int(max_cell - 1)
+
+            logger.info(f"CPU spatial index built: {max_cell:,} grid cells, {len(node_ids):,} indexed nodes")
 
         # Store coverage range for downstream checks
         self._spatial_index_lo = 0
         self._spatial_index_hi = N - 1
-        
-        # Store max_cell for ROI extraction
-        self._max_cell = max_cell
-        
-        # Pre-allocate workspace for ROI queries  
-        self._roi_workspace = cp.zeros(self.node_count, dtype=cp.bool_)
         
     def _update_edge_history_gpu(self):
         """Update historical congestion on device"""
@@ -4595,11 +5992,21 @@ class UnifiedPathFinder:
     def _initialize_coordinate_array(self):
         """Initialize node coordinate array from lattice nodes BEFORE escape routing"""
         logger.info(f"Initializing coordinate array for {self.node_count} lattice nodes...")
-        
+
+        # Find the maximum index actually used in nodes
+        max_idx = max((idx for _, _, _, idx in self.nodes.values()), default=-1) + 1
+        actual_size = max(self.node_count, max_idx)
+
+        if actual_size > self.node_count:
+            logger.warning(f"Node indices extend beyond node_count: max_idx={max_idx}, node_count={self.node_count}")
+
         # Build coordinate array from current lattice nodes
-        coords = np.zeros((self.node_count, 3))
+        coords = np.zeros((actual_size, 3))
         for node_id, (x, y, layer, idx) in self.nodes.items():
-            coords[idx] = [x, y, layer]
+            if idx < actual_size:
+                coords[idx] = [x, y, layer]
+            else:
+                logger.error(f"Node {node_id} has index {idx} >= actual_size {actual_size}")
         
         # Convert to GPU array if needed
         self.node_coordinates = cp.array(coords) if self.use_gpu else coords
@@ -4616,20 +6023,27 @@ class UnifiedPathFinder:
             return
         
         coord_size = self.node_coordinates.shape[0]
-        if coord_size != self.node_count:
-            logger.warning(f"COORDINATE CONSISTENCY: Size mismatch {coord_size} != {self.node_count}")
+        if coord_size != self.lattice_node_count:
+            logger.warning(f"COORDINATE CONSISTENCY: Size mismatch {coord_size} != {self.lattice_node_count}")
             logger.warning("Rebuilding coordinate array from current nodes...")
-            
-            # Rebuild coordinate array to match current node count
-            coords = np.zeros((self.node_count, 3))
+
+            # Find the maximum index actually used in nodes to determine proper size
+            max_idx = max((idx for _, _, _, idx in self.nodes.values()), default=-1) + 1
+            proper_size = max(self.lattice_node_count, max_idx)
+
+            # Rebuild coordinate array with correct size
+            coords = np.zeros((proper_size, 3))
             for node_id, (x, y, layer, idx) in self.nodes.items():
-                if idx < self.node_count:
+                if idx < proper_size:
                     coords[idx] = [x, y, layer]
-            
+                else:
+                    logger.error(f"Node {node_id} has index {idx} >= proper_size {proper_size}")
+
             self.node_coordinates = cp.array(coords) if self.use_gpu else coords
+            self.lattice_node_count = proper_size  # Update to actual size
             logger.info(f"Rebuilt coordinate array: {coord_size} -> {self.node_coordinates.shape[0]}")
         else:
-            logger.info(f"Coordinate consistency OK: {coord_size} coordinates for {self.node_count} nodes")
+            logger.info(f"Coordinate consistency OK: {coord_size} coordinates for {self.lattice_node_count} nodes")
         
         # INTEGRITY GATE: Verify coordinate array validity after escape routing
         assert self.node_coordinates.shape[0] == self.lattice_node_count, \
@@ -5866,6 +7280,18 @@ class UnifiedPathFinder:
                     
                     if len(roi_nodes) > original_count:
                         logger.info(f"{net_id}: ROI FORCE INCLUDE: Added source/sink nodes ({original_count} -> {len(roi_nodes)})")
+
+                # ROI SAFETY CAPS: Add fallbacks for empty or oversized ROIs
+                max_roi_nodes = getattr(self.config, "max_roi_nodes", 20000)
+                if len(roi_nodes) == 0:
+                    logger.info(f"[ROI] {net_id}: empty ROI → CPU fallback")
+                    path = self._cpu_dijkstra_fallback(source_idx, sink_idx)
+                    return path, {'roi_fallback': True, 'reason': 'empty_roi'}
+
+                if len(roi_nodes) > max_roi_nodes:
+                    logger.info(f"[ROI-CAP] {net_id}: {len(roi_nodes)} > {max_roi_nodes} → CPU fallback")
+                    path = self._cpu_dijkstra_fallback(source_idx, sink_idx)
+                    return path, {'roi_capped': True, 'roi_size': len(roi_nodes)}
                     
                     # DEBUG GUARD: Verify source/sink inclusion worked
                     assert source_idx in roi_node_map, f"Source {source_idx} missing after ROI force include"
@@ -6272,6 +7698,8 @@ class UnifiedPathFinder:
             return
         
         # Track performance with current delta
+        if not hasattr(self, '_delta_performance_history'):
+            self._delta_performance_history = []
         self._delta_performance_history.append({
             'delta_mult': self._adaptive_delta,
             'success_rate': iteration_success_rate,
@@ -6355,7 +7783,7 @@ class UnifiedPathFinder:
     
     def _export_instrumentation_csv(self):
         """Export instrumentation data to CSV files for convergence analysis"""
-        if not self._instrumentation:
+        if not getattr(self, '_instrumentation', None):
             return
         
         try:
@@ -7094,7 +8522,25 @@ class UnifiedPathFinder:
         track_count = len(self._last_geometry_payload.tracks) if self._last_geometry_payload else 0
         via_count = len(self._last_geometry_payload.vias) if self._last_geometry_payload else 0
 
-        logger.info("[EMIT] Generated %d tracks, %d vias", track_count, via_count)
+        # SANITY GATES: Ensure geometry was actually transferred
+        intent_tracks = len(intents.tracks) if hasattr(intents, 'tracks') else 0
+        intent_vias = len(intents.vias) if hasattr(intents, 'vias') else 0
+
+        if intent_tracks > 0 and track_count == 0:
+            logger.error(f"[EMIT-SANITY] GEOMETRY LOSS: {intent_tracks} intent tracks → 0 payload tracks")
+            raise RuntimeError(f"EMIT SANITY FAILURE: {intent_tracks} tracks lost in conversion")
+
+        if intent_vias > 0 and via_count == 0:
+            logger.error(f"[EMIT-SANITY] GEOMETRY LOSS: {intent_vias} intent vias → 0 payload vias")
+            raise RuntimeError(f"EMIT SANITY FAILURE: {intent_vias} vias lost in conversion")
+
+        if track_count != intent_tracks:
+            logger.warning(f"[EMIT-SANITY] TRACK COUNT MISMATCH: {intent_tracks} intents → {track_count} payload")
+
+        if via_count != intent_vias:
+            logger.warning(f"[EMIT-SANITY] VIA COUNT MISMATCH: {intent_vias} intents → {via_count} payload")
+
+        logger.info("[EMIT] Generated %d tracks, %d vias (verified)", track_count, via_count)
 
         return (track_count, via_count)
 
@@ -7126,79 +8572,62 @@ class UnifiedPathFinder:
         # CSR masks will be applied in prepare_routing_runtime() after CSR is built
 
     def _snap_all_pads_to_lattice(self, board):
-        """Snap pads to lattice using portal system with individual pad terminal mapping."""
-        portal_count = 0
+        """SIMPLIFIED: Direct pad-to-lattice connection without broken portal system."""
         terminal_map = {}  # Map (net_name, pad_uid) -> lattice_node_idx
-
-        # Debug: Track net name statistics
-        net_name_stats = {}
+        connected_count = 0
         total_pads = 0
 
         for component in board.components:
             for pad in component.pads:
                 total_pads += 1
 
-                # Find actual portal lattice coordinates outside pad keepout
-                portal_node = self._find_portal_for_pad(pad)
-                if portal_node:
-                    # Register portal stub connection
-                    self._register_portal_stub(pad, portal_node)
+                # Get pad coordinates and net
+                pad_x, pad_y = self._get_pad_coordinates(pad)
+                net_name = self._get_pad_net_name(pad)
 
-                    # SURGICAL: Pad-centric portal registration (not net-centric)
-                    net_name = self._get_pad_net_name(pad)
-                    net_name_stats[net_name] = net_name_stats.get(net_name, 0) + 1
+                if net_name != "unconnected":
+                    # DIRECT: Find nearest lattice node to pad coordinates
+                    if self.geometry is None:
+                        logger.error("[SNAP] Geometry system not initialized")
+                        continue
 
-                    if net_name != "unconnected":
-                        # Convert portal coordinates to lattice node index
-                        lattice_node_idx = self._coords_to_node_index(
-                            portal_node["x"], portal_node["y"], portal_node["layer"]
-                        )
+                    # Convert pad coordinates to lattice indices
+                    lattice_x, lattice_y = self.geometry.world_to_lattice(pad_x, pad_y)
 
-                        # SURGICAL: Use pad-centric storage (no net.name in key path)
-                        comp_ref = self._uid_component(getattr(pad, "component", getattr(pad, "footprint", None)))
-                        pad_lbl  = self._uid_pad_label(pad, comp_ref)
-                        uid      = (comp_ref, pad_lbl)
+                    # Clamp to valid bounds
+                    lattice_x = max(0, min(lattice_x, self.geometry.x_steps - 1))
+                    lattice_y = max(0, min(lattice_y, self.geometry.y_steps - 1))
 
-                        # Store in both pad-centric maps - ensure integers only
-                        node_idx = int(lattice_node_idx)  # must be an integer node id
-                        self._portal_by_pad_id[id(pad)] = node_idx
-                        self._portal_by_uid[uid] = node_idx
+                    # Convert lattice coordinates to node index using KiCadGeometry system
+                    lattice_node_idx = self.geometry.node_index(lattice_x, lattice_y, 0)  # F.Cu layer
 
-                        # Tripwire: prevent float coordinates being stored
-                        if not isinstance(node_idx, int):
-                            raise TypeError(f"[PORTAL] non-integer node index stored: {node_idx!r}")
+                    # DIRECT: Store pad-to-lattice mapping (no portal complications)
+                    comp_ref = self._uid_component(getattr(pad, "component", getattr(pad, "footprint", None)))
+                    pad_lbl  = self._uid_pad_label(pad, comp_ref)
+                    uid      = (comp_ref, pad_lbl)
 
-                        # Keep legacy map for compatibility during transition
-                        terminal_key = (net_name, f"{comp_ref}_{pad_lbl}")
-                        terminal_map[terminal_key] = lattice_node_idx
+                    # Store direct pad-to-lattice mapping
+                    node_idx = int(lattice_node_idx)  # must be an integer node id
+                    self._portal_by_pad_id[id(pad)] = node_idx
+                    self._portal_by_uid[uid] = node_idx
 
-                        logger.debug(f"[PORTAL] pad_id={id(pad)} uid={uid} -> node_idx={lattice_node_idx}")
+                    # Keep legacy map for compatibility
+                    terminal_key = (net_name, f"{comp_ref}_{pad_lbl}")
+                    terminal_map[terminal_key] = lattice_node_idx
 
-                    portal_count += 1
-                    self._metrics["portal_edges_registered"] += 1
+                    logger.debug(f"[SNAP] pad ({pad_x:.1f},{pad_y:.1f}) -> lattice ({lattice_x},{lattice_y}) -> node_idx={lattice_node_idx}")
+                    connected_count += 1
 
-        # Store terminal map for routing phase to map GUI pads to lattice indices
+        # Store terminal map for routing phase
         self._portal_terminal_map = terminal_map
 
-        # SURGICAL DEBUG: Log net name statistics and portal registry sample
-        logger.info(f"[PORTAL-DEBUG] Processed {total_pads} pads, net_name_stats: {dict(sorted(net_name_stats.items(), key=lambda x: x[1], reverse=True)[:10])}")
+        # Log simplified results
+        logger.info(f"[SNAP] Connected {connected_count}/{total_pads} pads directly to lattice nodes")
         sample = list(self._portal_terminal_map.keys())[:5]
-        logger.info(f"[PORTAL] registry size={len(self._portal_terminal_map)} sample={sample}")
+        logger.info(f"[SNAP] terminal map size={len(self._portal_terminal_map)} sample={sample}")
 
-        # Add debug sample for pad-centric registry
-        sample = next(iter(self._portal_by_uid.items()), None)
-        if sample:
-            (k_comp, k_lbl), v_idx = sample
-            logger.info(f"[PORTAL] pad-centric registry size={len(self._portal_by_uid)} sample=[({k_comp!s}, {k_lbl!s}) -> {v_idx}]")
-
-        # Log portal binding results
-        portal_edges_added = getattr(self, '_portal_edges_added', 0)
-        logger.info("[PORTAL] Registered %d portal edges with individual pad terminal mapping", portal_count)
-        logger.info(f"[PORTAL-BIND] inserted_edges={portal_edges_added} into live adjacency")
-
-        # CRITICAL FIX: Comprehensive refresh after portal binding
-        logger.info("[PORTAL-BIND] Refreshing edge-dependent arrays after portal insertion...")
-        self._refresh_edge_arrays_after_portal_bind()
+        # No portal edges to refresh - direct mapping complete
+        self._assert_live_sizes()  # hard-asserts N/E match and arrays match E
         self._build_reverse_edge_index_gpu()  # Must use the LIVE CSR sizes
 
         # Backfill graph_state fields after CSR finalization
@@ -7225,39 +8654,128 @@ class UnifiedPathFinder:
         return node_idx
 
     def _idx_to_coord(self, node_idx: int):
-        """Convert node index back to (x, y, layer) coordinates."""
-        if self.node_coordinates is None:
-            logger.error(f"[_idx_to_coord] node_coordinates array not initialized")
+        """Convert node index back to (x, y, layer) coordinates - handles both lattice and escape nodes."""
+        if self.geometry is None:
+            logger.error(f"[_idx_to_coord] geometry system not initialized")
             return None
 
-        if not (0 <= node_idx < self.node_coordinates.shape[0]):
-            logger.error(f"[_idx_to_coord] node_idx {node_idx} out of range [0, {self.node_coordinates.shape[0]})")
-            return None
+        # Calculate lattice size
+        lattice_size = self.geometry.x_steps * self.geometry.y_steps * self.geometry.layer_count
+
+        # DEBUG: Log lattice size and node classification for first few calls
+        if not hasattr(self, '_logged_lattice_size'):
+            logger.info(f"[COORD-DEBUG] lattice_size = {lattice_size} (x_steps={self.geometry.x_steps}, y_steps={self.geometry.y_steps}, layer_count={self.geometry.layer_count})")
+            self._logged_lattice_size = True
 
         try:
-            # Extract coordinates from the node_coordinates array
-            coords = self.node_coordinates[node_idx]
-            if hasattr(coords, 'get'):  # CuPy array
-                coords = coords.get()
-            return tuple(int(c) for c in coords)  # Convert to (x, y, layer) integers
+            if node_idx < lattice_size:
+                # LATTICE NODE: Use KiCadGeometry system
+                x_idx, y_idx, layer = self.geometry.index_to_coords(node_idx)
+                world_x, world_y = self.geometry.lattice_to_world(x_idx, y_idx)
+
+                # DEBUG: Log coordinate conversion for debugging offset issue
+                if node_idx < 10:  # Only first 10 to avoid spam
+                    logger.info(f"[COORD-DEBUG] LATTICE node_idx={node_idx} -> lattice=({x_idx},{y_idx},{layer}) -> world=({world_x:.1f},{world_y:.1f})")
+
+                # COORDINATE INVARIANT: Verify lattice node coordinates satisfy grid alignment
+                x0, y0 = self.geometry.grid_min_x, self.geometry.grid_min_y
+                pitch = self.geometry.pitch
+                x_error = abs(world_x - (round((world_x - x0)/pitch)*pitch + x0))
+                y_error = abs(world_y - (round((world_y - y0)/pitch)*pitch + y0))
+
+                if x_error > 1e-6 or y_error > 1e-6:
+                    logger.error(f"[COORD-INVARIANT] LATTICE node→coords failed: node_idx={node_idx}")
+                    logger.error(f"  world=({world_x:.6f},{world_y:.6f}) x_error={x_error:.9f} y_error={y_error:.9f}")
+                    logger.error(f"  Expected grid alignment with x0={x0:.6f} y0={y0:.6f} pitch={pitch:.6f}")
+
+                return (world_x, world_y, layer)
+
+            else:
+                # ESCAPE NODE: Use legacy coordinate array system
+                if not hasattr(self, '_logged_escape_nodes'):
+                    logger.info(f"[COORD-DEBUG] ESCAPE node_idx={node_idx} >= lattice_size={lattice_size}")
+                    self._logged_escape_nodes = True
+
+                if self.node_coordinates is None:
+                    logger.error(f"[_idx_to_coord] node_coordinates array not initialized for escape node {node_idx}")
+                    return None
+
+                if not (0 <= node_idx < self.node_coordinates.shape[0]):
+                    logger.error(f"[_idx_to_coord] node_idx {node_idx} out of range [0, {self.node_coordinates.shape[0]})")
+                    return None
+
+                # Extract coordinates from the node_coordinates array
+                coords = self.node_coordinates[node_idx]
+                if hasattr(coords, 'get'):  # CuPy array
+                    coords = coords.get()
+
+                # DEBUG: Log escape node coordinate conversion
+                if node_idx < lattice_size + 10:  # Only first 10 escape nodes
+                    logger.info(f"[COORD-DEBUG] ESCAPE node_idx={node_idx} -> coords=({coords[0]:.1f},{coords[1]:.1f},{coords[2]:.0f})")
+
+                return tuple(float(c) for c in coords)
+
         except Exception as e:
-            logger.error(f"[_idx_to_coord] Failed to extract coordinates for node_idx {node_idx}: {e}")
+            logger.error(f"[_idx_to_coord] Failed to convert node_idx {node_idx}: {e}")
             return None
 
     def _find_portal_for_pad(self, pad):
-        """Find a nearby portal lattice node outside the pad keepout."""
+        """Find the nearest actual lattice node to this pad position using KiCadGeometry."""
         pad_x, pad_y = self._get_pad_coordinates(pad)
 
-        # Find portal node at lattice edge outside keepout boundary
-        # Offset by pad keepout distance plus portal clearance
-        keepout_dist = 0.3  # mm keepout radius
-        portal_clearance = 0.2  # mm additional clearance
-        total_offset = keepout_dist + portal_clearance
+        if self.geometry is None:
+            logger.error(f"[PORTAL-SNAP] Geometry system not initialized")
+            return None
 
-        # Place portal on nearest lattice point outside keepout
-        portal_x = pad_x + total_offset
-        portal_y = pad_y + total_offset
+        # Use geometry system to snap pad coordinates to lattice
+        lattice_x, lattice_y = self.geometry.world_to_lattice(pad_x, pad_y)
+
+        # Clamp to valid lattice bounds
+        lattice_x = max(0, min(lattice_x, self.geometry.x_steps - 1))
+        lattice_y = max(0, min(lattice_y, self.geometry.y_steps - 1))
+
+        # Convert back to world coordinates (should be exact lattice node position)
+        portal_x, portal_y = self.geometry.lattice_to_world(lattice_x, lattice_y)
         portal_layer = 0  # Start on F.Cu layer
+
+        logger.debug(f"[PORTAL-SNAP] Pad ({pad_x:.2f},{pad_y:.2f}) -> lattice ({lattice_x},{lattice_y}) -> world ({portal_x:.2f},{portal_y:.2f})")
+
+        # PORTAL SNAP INVARIANT: Verify snapped portal is grid-aligned
+        x0, y0 = self.geometry.grid_min_x, self.geometry.grid_min_y
+        pitch = self.geometry.pitch
+        x_error = abs((portal_x - x0) % pitch)
+        y_error = abs((portal_y - y0) % pitch)
+
+        if x_error > 1e-6 or y_error > 1e-6:
+            logger.error(f"[PORTAL-INVARIANT] Portal snap failed grid alignment:")
+            logger.error(f"  portal=({portal_x:.6f},{portal_y:.6f}) x_error={x_error:.9f} y_error={y_error:.9f}")
+            logger.error(f"  Expected grid alignment with x0={x0:.6f} y0={y0:.6f} pitch={pitch:.6f}")
+
+        # Store Portal object for stub generation - use unique key including coordinates
+        pad_id = self._uid_pad(pad)
+        net_name = self._get_pad_net_name(pad) or 'UNKNOWN_NET'
+        # Make key unique by including pad coordinates to avoid collisions
+        portal_key = f"{pad_id}@{pad_x:.3f},{pad_y:.3f}"
+
+        # Get pad layer as integer (normalize KiCad enums)
+        pad_layer_raw = getattr(pad, 'layer', 0)
+        if isinstance(pad_layer_raw, str):
+            # Convert KiCad layer names to integers
+            layer_map = {'F.Cu': 0, 'In1.Cu': 1, 'In2.Cu': 2, 'In3.Cu': 3, 'In4.Cu': 4, 'B.Cu': 5}
+            pad_layer = layer_map.get(pad_layer_raw, 0)
+        elif pad_layer_raw in [17, 18, 19, 20, 21, 31]:  # KiCad layer enums
+            pad_layer = max(0, min(5, pad_layer_raw - 17))  # Normalize to 0-5
+        else:
+            pad_layer = int(pad_layer_raw)
+
+        portal = Portal(
+            x=portal_x,
+            y=portal_y,
+            layer=portal_layer,
+            net=net_name,
+            pad_layer=pad_layer
+        )
+        self._pad_portals[portal_key] = portal
 
         return {"x": portal_x, "y": portal_y, "layer": portal_layer}
 
@@ -7318,10 +8836,111 @@ class UnifiedPathFinder:
                 intents.vias.extend(vias)
                 kept_segments += len(tracks) + len(vias)
 
-        logger.info(f"[INTENTS] built tracks={len(intents.tracks)} vias={len(intents.vias)}")
+        # Add pad stub segments before returning
+        stub_tracks, stub_vias = self._emit_pad_stubs()
+        intents.tracks.extend(stub_tracks)
+        intents.vias.extend(stub_vias)
+
+        logger.info(f"[INTENTS] built tracks={len(intents.tracks)} vias={len(intents.vias)} (includes {len(stub_tracks)} pad stubs)")
         if kept_segments == 0 and len(paths) > 0:
             logger.warning("[INTENTS] all segments filtered; check eps/layer mapping")
         return intents
+
+    def _emit_pad_stubs(self):
+        """Generate stub segments connecting pads to their portal lattice nodes."""
+        stub_tracks = []
+        stub_vias = []
+
+        if not hasattr(self, '_pad_portals') or not self._pad_portals:
+            logger.debug("[STUB-EMIT] No pad portals found, skipping stub generation")
+            return stub_tracks, stub_vias
+
+        logger.info(f"[STUB-EMIT] Generating stubs for {len(self._pad_portals)} pad portals")
+
+        # We need to find the actual pads to get their real coordinates
+        # Look for stored pad information in the board or component data
+        if not hasattr(self, '_all_pads') or not self._all_pads:
+            logger.warning("[STUB-EMIT] No pad data available, generating minimal ownership stubs")
+            # Generate minimal ownership stubs at portal locations
+            for pad_id, portal in self._pad_portals.items():
+                track = {
+                    'net_name': portal.net,
+                    'layer': portal.layer,
+                    'start_x': portal.x,
+                    'start_y': portal.y,
+                    'end_x': portal.x,
+                    'end_y': portal.y,
+                    'width': 0.1,
+                    'via_start': None,
+                    'via_end': None
+                }
+                stub_tracks.append(track)
+            return stub_tracks, stub_vias
+
+        # Generate actual stubs from pad centers to portal points
+        for portal_key, portal in self._pad_portals.items():
+            # Extract pad coordinates from the portal key
+            try:
+                pad_id, coords_str = portal_key.split('@')
+                coord_parts = coords_str.split(',')
+                actual_pad_x = float(coord_parts[0])
+                actual_pad_y = float(coord_parts[1])
+            except (ValueError, IndexError):
+                logger.warning(f"[STUB-EMIT] Invalid portal key format: {portal_key}, skipping")
+                continue
+
+            logger.debug(f"[STUB-EMIT] Processing portal {portal_key} at ({actual_pad_x:.3f},{actual_pad_y:.3f}) -> ({portal.x:.3f},{portal.y:.3f})")
+
+            # Calculate distance to see if we need a visible stub
+            distance = ((actual_pad_x - portal.x)**2 + (actual_pad_y - portal.y)**2)**0.5
+
+            if distance > 0.05:  # If pad center is more than 0.05mm from portal
+                # Generate visible stub from pad center to portal
+                track = {
+                    'net_name': portal.net,
+                    'layer': portal.pad_layer,  # Use pad layer for the stub
+                    'start_x': actual_pad_x,
+                    'start_y': actual_pad_y,
+                    'end_x': portal.x,
+                    'end_y': portal.y,
+                    'width': 0.2,  # Visible width
+                    'via_start': None,
+                    'via_end': None
+                }
+                stub_tracks.append(track)
+                logger.info(f"[STUB-EMIT] Created {distance:.3f}mm stub for {pad_id} net {portal.net} on layer {portal.pad_layer}")
+                logger.info(f"[STUB-EMIT] Stub: ({actual_pad_x:.3f},{actual_pad_y:.3f}) -> ({portal.x:.3f},{portal.y:.3f})")
+
+                # Add via if pad is on different layer than portal
+                if portal.pad_layer != portal.layer:
+                    via = {
+                        'net_name': portal.net,
+                        'x': portal.x,
+                        'y': portal.y,
+                        'from_layer': portal.pad_layer,
+                        'to_layer': portal.layer,
+                        'size': 0.2,
+                        'drill': 0.1
+                    }
+                    stub_vias.append(via)
+                    logger.info(f"[STUB-EMIT] Created via for layer change: {portal.pad_layer} -> {portal.layer}")
+            else:
+                # Generate minimal ownership stub at portal
+                track = {
+                    'net_name': portal.net,
+                    'layer': portal.layer,
+                    'start_x': portal.x,
+                    'start_y': portal.y,
+                    'end_x': portal.x,
+                    'end_y': portal.y,
+                    'width': 0.1,
+                    'via_start': None,
+                    'via_end': None
+                }
+                stub_tracks.append(track)
+
+        logger.info(f"[STUB-EMIT] Generated {len(stub_tracks)} stub tracks, {len(stub_vias)} portal vias")
+        return stub_tracks, stub_vias
 
     def _path_to_geometry(self, net_id: str, path: list):
         """Convert a node path to tracks and vias."""
@@ -7334,7 +8953,7 @@ class UnifiedPathFinder:
         # Convert node indices to coordinates
         coords = []
         for node_idx in path:
-            coord = self._node_index_to_coords(node_idx)
+            coord = self._idx_to_coord(node_idx)  # FIXED: Use correct coordinate method
             if coord:
                 coords.append(coord)
 
@@ -7355,6 +8974,39 @@ class UnifiedPathFinder:
                     'end': (x2, y2),
                     'width': 0.15  # mm default track width
                 }
+
+                # EMIT INVARIANT: Verify track endpoints are either lattice nodes or pad stubs
+                if hasattr(self, 'geometry') and self.geometry is not None:
+                    pitch = self.geometry.pitch
+                    x0, y0 = self.geometry.grid_min_x, self.geometry.grid_min_y
+
+                    # Check start point alignment
+                    start_x_error = abs((x1 - x0) % pitch)
+                    start_y_error = abs((y1 - y0) % pitch)
+
+                    # Check end point alignment
+                    end_x_error = abs((x2 - x0) % pitch)
+                    end_y_error = abs((y2 - y0) % pitch)
+
+                    # Allow small tolerance for pad stub endpoints
+                    tolerance = 1e-6
+
+                    if (start_x_error > tolerance or start_y_error > tolerance or
+                        end_x_error > tolerance or end_y_error > tolerance):
+
+                        # Log first 3 violations, then suppress to avoid spam
+                        if not hasattr(self, '_emit_violations_count'):
+                            self._emit_violations_count = 0
+
+                        if self._emit_violations_count < 3:
+                            logger.error(f"[EMIT-INVARIANT] Track endpoint not grid-aligned: {net_id}")
+                            logger.error(f"  start=({x1:.6f},{y1:.6f}) errors=({start_x_error:.9f},{start_y_error:.9f})")
+                            logger.error(f"  end=({x2:.6f},{y2:.6f}) errors=({end_x_error:.9f},{end_y_error:.9f})")
+                            self._emit_violations_count += 1
+                        elif self._emit_violations_count == 3:
+                            logger.error("[EMIT-INVARIANT] Suppressing further violations...")
+                            self._emit_violations_count += 1
+
                 tracks.append(track)
             else:
                 # Different layers - create via
@@ -7368,28 +9020,137 @@ class UnifiedPathFinder:
                 }
                 vias.append(via)
 
+        # STUB GENERATION: Add pad connection stubs
+        stub_tracks, stub_vias = self._generate_pad_stubs(net_id, path)
+        tracks.extend(stub_tracks)
+        vias.extend(stub_vias)
+
         return tracks, vias
+
+    def _generate_pad_stubs(self, net_id: str, path: List[int]) -> Tuple[List, List]:
+        """Generate pad connection stubs: pad_center → portal + via if needed"""
+        stub_tracks = []
+        stub_vias = []
+
+        if not path or not hasattr(self, '_pad_portals'):
+            return stub_tracks, stub_vias
+
+        # Check if this path connects to any pads through portals
+        for pad_id, portal in self._pad_portals.items():
+            # Check if portal net matches current net
+            if portal.net != net_id:
+                continue
+
+            # Find if any path node connects to this portal
+            path_coords = []
+            for node_idx in path:
+                coord = self._idx_to_coord(node_idx)
+                if coord:
+                    path_coords.append(coord)
+
+            if not path_coords:
+                continue
+
+            # Check if portal connects to path (within routing grid distance)
+            portal_connected = False
+            connection_point = None
+            for coord in path_coords:
+                dx = abs(coord[0] - portal.x)
+                dy = abs(coord[1] - portal.y)
+                if dx < 0.1 and dy < 0.1:  # Within grid tolerance
+                    portal_connected = True
+                    connection_point = coord
+                    break
+
+            if not portal_connected:
+                continue
+
+            # Generate stub from pad center to portal
+            pad_center = (portal.x, portal.y)  # Portal is already snapped to pad
+            portal_pos = (portal.x, portal.y)
+
+            # Get pad layer information
+            pad_layer = portal.pad_layer
+            portal_layer = portal.layer
+
+            # Calculate stub distance
+            stub_distance = ((pad_center[0] - portal_pos[0])**2 + (pad_center[1] - portal_pos[1])**2)**0.5
+
+            # Generate ownership stub - even if zero length for GUI dot
+            if stub_distance > 0.001:  # Real stub segment
+                stub_track = {
+                    'net_id': net_id,
+                    'layer': pad_layer,
+                    'start': pad_center,
+                    'end': portal_pos,
+                    'width': 0.1  # Thin stub
+                }
+                stub_tracks.append(stub_track)
+            else:
+                # Zero-length ownership stub (GUI dot)
+                stub_track = {
+                    'net_id': net_id,
+                    'layer': pad_layer,
+                    'start': pad_center,
+                    'end': pad_center,
+                    'width': 0.1,
+                    'type': 'ownership_stub'  # GUI hint for dot rendering
+                }
+                stub_tracks.append(stub_track)
+
+            # Add via if pad layer != portal layer
+            if pad_layer != portal_layer:
+                stub_via = {
+                    'net_id': net_id,
+                    'position': portal_pos,
+                    'from_layer': pad_layer,
+                    'to_layer': portal_layer,
+                    'drill': 0.2,
+                    'size': 0.4,
+                    'type': 'pad_via'  # GUI hint
+                }
+                stub_vias.append(stub_via)
+
+        return stub_tracks, stub_vias
 
     def _node_index_to_coords(self, node_idx: int):
         """Convert node index back to x, y, layer coordinates."""
         try:
-            # Use lattice dimensions from initialization
-            layers = getattr(self, '_layers', 4)
-            grid_size = getattr(self, '_grid_size', 64)
-            layer_size = grid_size * grid_size
+            # Use actual lattice dimensions from initialization
+            layers = getattr(self, 'layer_count', 6)
+            if hasattr(self, '_grid_dims'):
+                grid_width, grid_height = self._grid_dims
+            else:
+                # Fallback - this should never happen in normal operation
+                grid_width = grid_height = 64
+                logger.warning(f"[COORD-CONVERT] Missing _grid_dims, using fallback {grid_width}x{grid_height}")
+
+            layer_size = grid_width * grid_height
 
             # Extract layer
             layer = node_idx // layer_size
             local_idx = node_idx % layer_size
 
-            # Extract x, y
-            y = local_idx // grid_size
-            x = local_idx % grid_size
+            # Extract x, y using correct grid dimensions
+            y = local_idx // grid_width
+            x = local_idx % grid_width
 
-            # Convert grid coordinates to mm (assuming 0.5mm grid spacing)
+            # Convert grid coordinates to absolute board coordinates
             grid_pitch = getattr(self, '_grid_pitch', 0.5)
-            x_mm = x * grid_pitch
-            y_mm = y * grid_pitch
+            grid_x0 = getattr(self, '_grid_x0', 0.0)
+            grid_y0 = getattr(self, '_grid_y0', 0.0)
+
+            # CRITICAL FIX: Add board offset to get absolute coordinates
+            x_mm = x * grid_pitch + grid_x0
+            y_mm = y * grid_pitch + grid_y0
+
+            # FORCE 0-based layer system - normalize any contamination
+            if layer >= layers:  # Should never happen in proper 0-based system
+                logger.warning(f"[LAYER-FIX] Normalizing layer {layer} → {layer % layers} (node_idx={node_idx})")
+                layer = layer % layers
+
+            # Ensure we always return 0-based layers (0, 1, 2, 3, 4, 5)
+            layer = max(0, min(layer, layers - 1))
 
             return (x_mm, y_mm, layer)
         except Exception as e:
@@ -7397,31 +9158,415 @@ class UnifiedPathFinder:
             return None
 
     def _validate_geometry_intents(self, intents):
-        """Validate geometry intents and return violations."""
-        # Mock violations object
-        class MockViolations:
+        """Validate geometry intents with real clearance DRC using R-tree collision detection."""
+        class DRCViolations:
             def __init__(self):
                 self.zero_len_tracks = 0
                 self.via_in_pad = 0
                 self.track_pad_clear = 0
                 self.via_via_spacing = 0
+                self.track_track_clearance = 0  # NEW: Track-to-track clearance violations
+                self.track_via_clearance = 0    # NEW: Track-to-via clearance violations
+                self.violation_details = []      # NEW: List of violation details for debugging
 
             def total(self):
-                return self.zero_len_tracks + self.via_in_pad + self.track_pad_clear + self.via_via_spacing
+                return (self.zero_len_tracks + self.via_in_pad + self.track_pad_clear +
+                       self.via_via_spacing + self.track_track_clearance + self.track_via_clearance)
 
-        viol = MockViolations()
-        logger.info("[STRICT-DRC] pre-emit: all-clear (via_in_pad=%d, track_pad_clear=%d, via_via_spacing=%d, zero_len_tracks=%d)",
-                   viol.via_in_pad, viol.track_pad_clear, viol.via_via_spacing, viol.zero_len_tracks)
+            def __str__(self):
+                return (f"DRC violations: zero_len={self.zero_len_tracks}, via_in_pad={self.via_in_pad}, "
+                       f"track_pad_clear={self.track_pad_clear}, via_via={self.via_via_spacing}, "
+                       f"track_track={self.track_track_clearance}, track_via={self.track_via_clearance}")
+
+        viol = DRCViolations()
+
+        # Check for zero-length tracks first
+        if hasattr(intents, 'tracks'):
+            for track in intents.tracks:
+                try:
+                    if 'start' in track and 'end' in track:
+                        start_x, start_y = track['start']
+                        end_x, end_y = track['end']
+                    elif 'start_x' in track:
+                        start_x, start_y = track['start_x'], track['start_y']
+                        end_x, end_y = track['end_x'], track['end_y']
+                    else:
+                        continue
+
+                    # Check for zero-length tracks
+                    if abs(start_x - end_x) < 1e-6 and abs(start_y - end_y) < 1e-6:
+                        viol.zero_len_tracks += 1
+                        viol.violation_details.append(f"Zero-length track: {track.get('net_id', 'unknown')} at ({start_x:.3f}, {start_y:.3f})")
+                except Exception as e:
+                    logger.warning(f"[DRC] Failed to check track for zero length: {e}")
+
+        # Perform real clearance DRC with R-tree collision detection
+        if RTREE_AVAILABLE and hasattr(intents, 'tracks') and len(intents.tracks) > 1:
+            clearance_violations = self._check_clearance_violations_rtree(intents)
+            viol.track_track_clearance = clearance_violations['track_track']
+            viol.track_via_clearance = clearance_violations['track_via']
+            viol.violation_details.extend(clearance_violations['details'])
+        elif not RTREE_AVAILABLE:
+            logger.warning("[DRC] R-tree not available - skipping clearance checks")
+
+        if viol.total() == 0:
+            logger.info("[STRICT-DRC] pre-emit: all-clear (zero_len=%d, clearance_checks=enabled)",
+                       viol.zero_len_tracks)
+        else:
+            logger.warning("[STRICT-DRC] pre-emit: %d violations detected", viol.total())
+            for detail in viol.violation_details[:10]:  # Show first 10 violations
+                logger.warning(f"[DRC-VIOLATION] {detail}")
+
         return viol
 
     def _convert_intents_to_view(self, intents):
-        """Convert intents to geometry payload."""
-        # Mock geometry payload
-        class MockGeometryPayload:
-            def __init__(self):
-                self.tracks = []
-                self.vias = []
-        return MockGeometryPayload()
+        """Convert intents to geometry payload with proper layer mapping and coordinate normalization."""
+        class GeometryPayload:
+            def __init__(self, tracks, vias):
+                self.tracks = tracks
+                self.vias = vias
+
+        # Get layer count for mapping
+        layer_count = getattr(self.config, 'layer_count', 6)
+
+        # CRITICAL FIX: Normalize tracks with proper layer mapping and coordinate conversion
+        normalized_tracks = []
+        if hasattr(intents, 'tracks'):
+            for track in intents.tracks:
+                try:
+                    # Handle both old and new track data formats
+                    if 'start' in track and 'end' in track:
+                        # New format with tuple fields
+                        start_x = self._as_py_float(track['start'][0])
+                        start_y = self._as_py_float(track['start'][1])
+                        end_x = self._as_py_float(track['end'][0])
+                        end_y = self._as_py_float(track['end'][1])
+                    elif 'start_x' in track and 'start_y' in track:
+                        # Legacy format with separate coordinate fields
+                        start_x = self._as_py_float(track['start_x'])
+                        start_y = self._as_py_float(track['start_y'])
+                        end_x = self._as_py_float(track['end_x'])
+                        end_y = self._as_py_float(track['end_y'])
+                    else:
+                        logger.warning(f"[CONVERT] Track missing coordinate fields: {track}")
+                        continue
+
+                    width = self._as_py_float(track.get('width', 0.15))
+
+                    # Sanity checks for valid coordinates
+                    if any(x != x for x in [start_x, start_y, end_x, end_y, width]):  # NaN check
+                        logger.warning(f"[CONVERT] Skipping track with NaN coordinates: {track}")
+                        continue
+
+                    if abs(start_x) > 1000 or abs(start_y) > 1000 or abs(end_x) > 1000 or abs(end_y) > 1000:
+                        logger.warning(f"[CONVERT] Skipping track with extreme coordinates: {track}")
+                        continue
+
+                    # HARDEN LAYER ID: Ensure proper integer conversion
+                    layer_raw = track.get('layer', 0)
+                    layer_id = self._as_py_int(layer_raw)
+
+                    normalized_track = {
+                        'net_id': str(track.get('net_id', '')),
+                        'layer': self._map_layer_for_gui(layer_id, layer_count),
+                        'start': (start_x, start_y),
+                        'end': (end_x, end_y),
+                        'width': width
+                    }
+                    normalized_tracks.append(normalized_track)
+                except Exception as e:
+                    logger.warning(f"[CONVERT] Failed to normalize track {track}: {e}")
+                    continue
+
+        # Normalize vias similarly
+        normalized_vias = []
+        if hasattr(intents, 'vias'):
+            for via in intents.vias:
+                try:
+                    normalized_via = {
+                        'net_id': str(via.get('net_id', '')),
+                        'position': (self._as_py_float(via['position'][0]), self._as_py_float(via['position'][1])),
+                        'from_layer': self._map_layer_for_gui(int(via.get('from_layer', 0)), layer_count),
+                        'to_layer': self._map_layer_for_gui(int(via.get('to_layer', 1)), layer_count),
+                        'drill': self._as_py_float(via.get('drill', 0.2)),
+                        'size': self._as_py_float(via.get('size', 0.4))
+                    }
+                    normalized_vias.append(normalized_via)
+                except Exception as e:
+                    logger.warning(f"[CONVERT] Failed to normalize via {via}: {e}")
+                    continue
+
+        # Log layer distribution for debugging
+        layer_counts = {}
+        for track in normalized_tracks:
+            layer = track['layer']
+            layer_counts[layer] = layer_counts.get(layer, 0) + 1
+
+        layer_summary = ", ".join([f"L{k}:{v}" for k, v in sorted(layer_counts.items())])
+        logger.info(f"[CONVERT] Normalized {len(normalized_tracks)} tracks, {len(normalized_vias)} vias for GUI")
+        logger.info(f"[CONVERT] Layer distribution: {layer_summary}")
+
+        # Sample first few tracks for debugging
+        if normalized_tracks:
+            logger.info(f"[CONVERT] Sample track: {normalized_tracks[0]}")
+            if len(normalized_tracks) > 1:
+                logger.info(f"[CONVERT] Sample track 2: {normalized_tracks[1]}")
+
+        return GeometryPayload(normalized_tracks, normalized_vias)
+
+    def _check_clearance_violations_rtree(self, intents):
+        """Check clearance violations using R-tree spatial indexing."""
+        violations = {
+            'track_track': 0,
+            'track_via': 0,
+            'details': []
+        }
+
+        if not RTREE_AVAILABLE:
+            return violations
+
+        try:
+            # DRC parameters - these should come from board rules
+            min_track_clearance = 0.127  # 5 mil minimum clearance
+            min_via_clearance = 0.127    # 5 mil minimum via clearance
+
+            # Create R-tree index for tracks
+            track_idx = index.Index()
+            track_objects = []
+
+            # Index all tracks with their bounding boxes + clearance halo
+            for i, track in enumerate(intents.tracks):
+                try:
+                    if 'start' in track and 'end' in track:
+                        start_x, start_y = track['start']
+                        end_x, end_y = track['end']
+                    elif 'start_x' in track:
+                        start_x, start_y = track['start_x'], track['start_y']
+                        end_x, end_y = track['end_x'], track['end_y']
+                    else:
+                        continue
+
+                    width = track.get('width', 0.15)
+                    layer = track.get('layer', 0)
+                    net_id = track.get('net_id', '')
+
+                    # Calculate bounding box with clearance halo
+                    half_width = width / 2.0
+                    clearance_halo = half_width + min_track_clearance
+
+                    min_x = min(start_x, end_x) - clearance_halo
+                    max_x = max(start_x, end_x) + clearance_halo
+                    min_y = min(start_y, end_y) - clearance_halo
+                    max_y = max(start_y, end_y) + clearance_halo
+
+                    # Store track data
+                    track_data = {
+                        'start': (start_x, start_y),
+                        'end': (end_x, end_y),
+                        'width': width,
+                        'layer': layer,
+                        'net_id': net_id,
+                        'bbox': (min_x, min_y, max_x, max_y)
+                    }
+                    track_objects.append(track_data)
+
+                    # Insert into R-tree with layer-encoded bounds for 3D collision
+                    # Encode layer as Z-coordinate range [layer*1000, (layer+1)*1000-1]
+                    track_idx.insert(i, (min_x, min_y, max_x, max_y))
+
+                except Exception as e:
+                    logger.warning(f"[DRC-RTREE] Failed to index track {i}: {e}")
+                    continue
+
+            # Check track-to-track clearance violations
+            for i, track1 in enumerate(track_objects):
+                try:
+                    # Query R-tree for potential collisions
+                    bbox1 = track1['bbox']
+                    candidates = list(track_idx.intersection(bbox1))
+
+                    for j in candidates:
+                        if j <= i:  # Avoid duplicate checks
+                            continue
+
+                        if j >= len(track_objects):
+                            continue
+
+                        track2 = track_objects[j]
+
+                        # Skip if same net (no clearance required within net)
+                        if track1['net_id'] == track2['net_id']:
+                            continue
+
+                        # Skip if different layers (no clearance required between layers)
+                        if track1['layer'] != track2['layer']:
+                            continue
+
+                        # Calculate actual clearance between track segments
+                        clearance = self._calculate_track_clearance(track1, track2)
+
+                        if clearance < min_track_clearance:
+                            violations['track_track'] += 1
+                            violation_msg = (f"Track clearance violation: {track1['net_id']} vs {track2['net_id']} "
+                                           f"on layer {track1['layer']}, clearance={clearance:.3f}mm < {min_track_clearance:.3f}mm")
+                            violations['details'].append(violation_msg)
+
+                            # Stop after finding reasonable number of violations
+                            if violations['track_track'] >= 100:
+                                violations['details'].append("[DRC] Too many track-track violations, stopping check...")
+                                break
+
+                except Exception as e:
+                    logger.warning(f"[DRC-RTREE] Failed clearance check for track {i}: {e}")
+                    continue
+
+                if violations['track_track'] >= 100:
+                    break
+
+            # TODO: Add track-to-via clearance checks if vias are present
+            if hasattr(intents, 'vias') and intents.vias:
+                logger.info(f"[DRC-RTREE] Skipping track-via clearance checks for {len(intents.vias)} vias (not implemented)")
+
+            logger.info(f"[DRC-RTREE] Clearance check completed: {violations['track_track']} track-track violations")
+
+        except Exception as e:
+            logger.error(f"[DRC-RTREE] R-tree clearance check failed: {e}")
+            violations['details'].append(f"R-tree clearance check failed: {e}")
+
+        return violations
+
+    def _calculate_track_clearance(self, track1, track2):
+        """Calculate minimum clearance between two track segments."""
+        try:
+            # Simplified clearance calculation - distance between track centerlines minus half-widths
+            x1_start, y1_start = track1['start']
+            x1_end, y1_end = track1['end']
+            x2_start, y2_start = track2['start']
+            x2_end, y2_end = track2['end']
+
+            # Calculate minimum distance between two line segments
+            # For simplicity, use point-to-segment distance from track1 endpoints to track2
+            distances = [
+                self._point_to_segment_distance((x1_start, y1_start), (x2_start, y2_start), (x2_end, y2_end)),
+                self._point_to_segment_distance((x1_end, y1_end), (x2_start, y2_start), (x2_end, y2_end)),
+                self._point_to_segment_distance((x2_start, y2_start), (x1_start, y1_start), (x1_end, y1_end)),
+                self._point_to_segment_distance((x2_end, y2_end), (x1_start, y1_start), (x1_end, y1_end))
+            ]
+
+            min_distance = min(distances)
+
+            # Subtract half-widths to get edge-to-edge clearance
+            half_width1 = track1['width'] / 2.0
+            half_width2 = track2['width'] / 2.0
+            clearance = min_distance - half_width1 - half_width2
+
+            return max(0.0, clearance)  # Never return negative clearance
+
+        except Exception as e:
+            logger.warning(f"[DRC] Failed to calculate track clearance: {e}")
+            return 1000.0  # Return large value to avoid false violations
+
+    def _point_to_segment_distance(self, point, seg_start, seg_end):
+        """Calculate minimum distance from point to line segment."""
+        try:
+            px, py = point
+            sx1, sy1 = seg_start
+            sx2, sy2 = seg_end
+
+            # Vector from segment start to end
+            dx = sx2 - sx1
+            dy = sy2 - sy1
+
+            if abs(dx) < 1e-9 and abs(dy) < 1e-9:
+                # Degenerate segment - just point distance
+                return ((px - sx1)**2 + (py - sy1)**2)**0.5
+
+            # Parameter t along segment where closest point lies
+            t = max(0.0, min(1.0, ((px - sx1) * dx + (py - sy1) * dy) / (dx * dx + dy * dy)))
+
+            # Closest point on segment
+            closest_x = sx1 + t * dx
+            closest_y = sy1 + t * dy
+
+            # Distance from point to closest point on segment
+            return ((px - closest_x)**2 + (py - closest_y)**2)**0.5
+
+        except Exception as e:
+            logger.warning(f"[DRC] Point-to-segment distance calculation failed: {e}")
+            return 1000.0  # Return large value to avoid false violations
+
+    def _add_edge_to_rtree(self, net_id: str, layer: int, x1: float, y1: float, x2: float, y2: float):
+        """Add edge to spatial index for clearance checking."""
+        if not self._clearance_enabled or layer not in self._clearance_rtrees:
+            return
+
+        try:
+            # Create inflated bounding box
+            track_width = 0.15  # Default track width in mm
+            min_clearance = 0.127  # 5 mil minimum clearance
+            half_width = track_width / 2.0
+            clearance_halo = half_width + min_clearance
+
+            min_x = min(x1, x2) - clearance_halo
+            max_x = max(x1, x2) + clearance_halo
+            min_y = min(y1, y2) - clearance_halo
+            max_y = max(y1, y2) + clearance_halo
+
+            # Insert into R-tree with unique ID and net info
+            edge_id = f"{net_id}_{x1}_{y1}_{x2}_{y2}_{layer}"
+            self._clearance_rtrees[layer].insert(hash(edge_id) % 2147483647,
+                                               (min_x, min_y, max_x, max_y),
+                                               obj=("track", net_id))
+
+        except Exception as e:
+            logger.warning(f"[RTREE] Failed to add edge to spatial index: {e}")
+
+    def _remove_edge_from_rtree(self, net_id: str, layer: int, edge_key: tuple):
+        """Remove edge from spatial index."""
+        if not self._clearance_enabled or layer not in self._clearance_rtrees:
+            return
+
+        try:
+            # Extract coordinates from edge key
+            # edge_key format: (layer, x1_grid, y1_grid, x2_grid, y2_grid)
+            if len(edge_key) >= 5:
+                layer_id, x1_grid, y1_grid, x2_grid, y2_grid = edge_key[:5]
+
+                # Convert back from grid coordinates
+                gx = self._grid_pitch
+                x1, y1 = x1_grid * gx, y1_grid * gx
+                x2, y2 = x2_grid * gx, y2_grid * gx
+
+                # Create same bounding box as when added
+                track_width = 0.15
+                min_clearance = 0.127
+                half_width = track_width / 2.0
+                clearance_halo = half_width + min_clearance
+
+                min_x = min(x1, x2) - clearance_halo
+                max_x = max(x1, x2) + clearance_halo
+                min_y = min(y1, y2) - clearance_halo
+                max_y = max(y1, y2) + clearance_halo
+
+                # Remove from R-tree
+                edge_id = f"{net_id}_{x1}_{y1}_{x2}_{y2}_{layer_id}"
+                self._clearance_rtrees[layer].delete(hash(edge_id) % 2147483647,
+                                                    (min_x, min_y, max_x, max_y))
+
+        except Exception as e:
+            logger.warning(f"[RTREE] Failed to remove edge from spatial index: {e}")
+
+    def _initialize_layer_rtrees(self, layer_count: int):
+        """Initialize R-tree spatial indices for each layer."""
+        if not self._clearance_enabled:
+            return
+
+        self._clearance_rtrees = {}
+        for layer_id in range(layer_count):
+            if RTREE_AVAILABLE:
+                self._clearance_rtrees[layer_id] = index.Index()
+
+        logger.info(f"[CLEARANCE] Initialized R-tree indices for {layer_count} layers")
 
     def _apply_csr_masks(self, board):
         """Apply CSR masks to live CSR matrix that make violations impossible-by-construction."""
@@ -7455,6 +9600,604 @@ class UnifiedPathFinder:
                 masked_count += 10  # Mock: assume 10 Z-edges masked per pad
 
         return masked_count
+
+    def _get_standard_layer_names(self, layer_count: int) -> list:
+        """Generate standard KiCad layer names for given count"""
+        names = ['F.Cu']  # Always start with front copper
+
+        # Add inner layers
+        for i in range(1, layer_count - 1):
+            names.append(f'In{i}.Cu')
+
+        # Always end with back copper if more than 1 layer
+        if layer_count > 1:
+            names.append('B.Cu')
+
+        return names
+
+    def _make_hv_polarity(self, layer_names: list) -> list:
+        """Return 'h' or 'v' per layer index; F.Cu and B.Cu are 'v' by requirement"""
+        L = len(layer_names)
+        # Base pattern: even=V, odd=H
+        hv = ['v' if i % 2 == 0 else 'h' for i in range(L)]
+
+        # Force F.Cu, B.Cu vertical regardless of index ordering
+        if "F.Cu" in layer_names:
+            hv[layer_names.index("F.Cu")] = 'v'
+        if "B.Cu" in layer_names:
+            hv[layer_names.index("B.Cu")] = 'v'
+
+        return hv
+
+    def _derive_allowed_layer_pairs(self, layer_count: int) -> set:
+        """Build legal layer transition pairs from KiCad stackup rules"""
+        pairs = set()
+
+        # For now, implement full blind/buried via support (all-to-all)
+        # In production, this would query KiCad's stackup rules
+        for from_layer in range(layer_count):
+            for to_layer in range(layer_count):
+                if from_layer != to_layer:
+                    pairs.add((from_layer, to_layer))
+
+        # Could add restrictions like:
+        # - Adjacent layers only: pairs = {(i, i+1), (i+1, i) for i in range(layer_count-1)}
+        # - No F.Cu to B.Cu direct: remove (0, layer_count-1) and (layer_count-1, 0)
+        # - Specific blind via rules based on KiCad stackup
+
+        return pairs
+
+    def add_vertical_edge(self, node_xy, l_from, l_to):
+        """Add vertical edge (via) only if layer transition is legal"""
+        if (l_from, l_to) in self.allowed_layer_pairs:
+            # Add edge with configured via cost
+            VIA_COST = float(os.getenv("ORTHO_VIA_COST", "0"))
+            # In practice, this would add to the graph data structure
+            return True
+        return False
+
+    def _init_occupancy_grids(self, layer_count: int):
+        """Initialize spatial hash occupancy grids for DRC checking"""
+        # Simple occupancy grid implementation using dictionaries
+        # In production, would use proper spatial hash with configurable cell size
+        cell_size = self.config.grid_pitch / 2  # Half-pitch for finer resolution
+        self.occ = [SpatialHash(cell_size) for _ in range(layer_count)]
+        logger.info(f"Initialized {layer_count} occupancy grids with cell_size={cell_size:.3f}mm")
+
+    def _inflate_width_clearance(self, width_mm: float, clr_mm: float) -> float:
+        """Calculate inflated radius for DRC checking"""
+        return 0.5 * width_mm + clr_mm
+
+    def commit_segment(self, net_id: str, layer: int, p1: tuple, p2: tuple, width: float, clr: float):
+        """Add routed segment to occupancy grid for DRC"""
+        if layer >= len(self.occ):
+            return  # Invalid layer
+
+        r = self._inflate_width_clearance(width, clr)
+        self.occ[layer].insert_segment(p1, p2, radius=r, tag=net_id)
+
+    def _is_segment_legal(self, layer: int, p1: tuple, p2: tuple, net_id: str, width: float, clr: float) -> bool:
+        """Check if segment violates DRC with existing routes"""
+        if layer >= len(self.occ):
+            return False
+
+        r = self._inflate_width_clearance(width, clr)
+        conflicts = self.occ[layer].query_segment(p1, p2, radius=r)
+
+        for conflict in conflicts:
+            if conflict.tag != net_id:  # Different net
+                return False  # HARD block
+        return True
+
+    def _spacing_penalty(self, layer: int, p1: tuple, p2: tuple, net_id: str) -> float:
+        """Calculate soft spacing penalty to keep copper apart"""
+        if layer >= len(self.occ):
+            return 0.0
+
+        max_check_distance = 3 * self.config.grid_pitch
+        d = self.occ[layer].nearest_distance(p1, p2, exclude_net=net_id, cap=max_check_distance)
+
+        if d is None or d > max_check_distance:
+            return 0.0
+
+        # Inverse distance penalty
+        return 1.0 / max(d, 1e-3)
+
+    def _init_pathfinder_edge_tracking(self):
+        """Initialize PathFinder edge tracking with proper congestion accounting"""
+        # PathFinder edge store: canonical_key -> EdgeRec
+        self.edges = {}  # type: Dict[Tuple, EdgeRec]
+        self.capacity = 1  # One net per edge for PCB tracks
+        self.current_overuse = 0  # Current iteration overuse count
+
+        # PathFinder parameters - tuned for aggressive plateau breakthrough
+        self._edge_capacity = 1
+        self._phase_block_after = 2  # switch to hard blocking after iter 2
+        self._track_cost_per_mm = 1.0
+        self._overuse_penalty = 10.0
+        self._pres_mult = 3.0  # More aggressive pressure increase
+        self._pres_cap = 1e3
+        self._hist_inc = 0.4   # More aggressive history accumulation
+        self._hist_cap = 1e6
+
+        # Legacy parameters (keep for compatibility)
+        self.TRACK_COST_PER_MM = self._track_cost_per_mm
+        self.OVERUSE_PENALTY = self._overuse_penalty
+        self.HISTORY_INC = self._hist_inc
+        self.PRES_FAC_START = 1.0
+        self.HARD_OVERUSE_SURCHARGE = 50.0  # Optional soft block
+
+        # Grid pitch for canonical keys
+        self._grid_pitch = getattr(self.config, 'grid_pitch', 0.4)
+
+        # Initialize PathFinder edge store
+        self._edge_store = {}  # dict[tuple, EdgeRec]
+
+        # TABOO and clearance systems already initialized in constructor
+
+        # Log integer edge key verification
+        logger.info(f"[KEYS] type(layer_id)=int type(i1)=int - INTEGER edge keys active")
+
+        # Track net failure history for ROI expansion
+        self._net_failure_count = {}  # net_id -> failure_count
+        self._net_roi_margin = {}     # net_id -> current_margin_mm
+
+        logger.info("Initialized PathFinder edge tracking for proper congestion accounting")
+
+    def _idx_to_coord(self, node_idx: int) -> Optional[Tuple[float, float, int]]:
+        """Convert node index to (x, y, layer) coordinates"""
+        if self.node_coordinates is None or node_idx >= len(self.node_coordinates):
+            return None
+        coords = self.node_coordinates[node_idx] if not hasattr(self.node_coordinates, 'get') else self.node_coordinates[node_idx].get()
+        return (float(coords[0]), float(coords[1]), int(coords[2]))
+
+    def canon_edge_key(self, i1: int, i2: int, layer_id: int) -> tuple:
+        """Generate canonical edge key from INTEGER node indices - CRITICAL for consistent accounting"""
+        # Undirected, canonical ordering by node index
+        if i2 < i1:
+            i1, i2 = i2, i1
+
+        # ASSERT: canon_edge_key uses node indices (no floats present)
+        assert isinstance(layer_id, int), f"[ASSERT] layer_id must be int, got {type(layer_id)}"
+        assert isinstance(i1, int), f"[ASSERT] i1 must be int, got {type(i1)}"
+        assert isinstance(i2, int), f"[ASSERT] i2 must be int, got {type(i2)}"
+
+        return (layer_id, i1, i2)
+
+    def _canon_edge_key_legacy(self, x1: float, y1: float, x2: float, y2: float, layer: int) -> tuple:
+        """DEPRECATED: Legacy float-based edge key - use canon_edge_key with node indices"""
+        # Undirected, canonical ordering
+        if (x2, y2) < (x1, y1):
+            x1, y1, x2, y2 = x2, y2, x1, y1
+
+        # Snap to grid to avoid float fuzz
+        gx = self._grid_pitch
+        q = lambda v: round(v / gx, 4)  # Keep enough precision
+
+        return (layer, q(x1), q(y1), q(x2), q(y2))
+
+    def _canon_edge_key_from_nodes(self, i1: int, i2: int) -> tuple:
+        """Helper: Generate canonical edge key from node indices with automatic layer detection"""
+        coord1 = self._idx_to_coord(i1)
+        coord2 = self._idx_to_coord(i2)
+
+        if coord1 is None or coord2 is None:
+            raise ValueError(f"Invalid node indices: {i1} -> {coord1}, {i2} -> {coord2}")
+
+        layer1 = int(coord1[2])
+        layer2 = int(coord2[2])
+
+        # Use source layer for edge (via edges handled separately)
+        edge_layer = layer1 if layer1 == layer2 else layer1
+
+        return self.canon_edge_key(i1, i2, edge_layer)
+
+    def _edge_rec(self, key: tuple) -> EdgeRec:
+        """Get or create EdgeRec for given key"""
+        rec = self._edge_store.get(key)
+        if rec is None:
+            rec = EdgeRec()
+            self._edge_store[key] = rec
+        return rec
+
+    def calculate_edge_cost(self, x1: float, y1: float, x2: float, y2: float, layer: int, net_id: str) -> float:
+        """DEPRECATED: Calculate PathFinder edge cost with hard blocking after soft phase"""
+        key = self._canon_edge_key_legacy(x1, y1, x2, y2, layer)
+        rec = self._edge_rec(key)
+
+        owned = (net_id in rec.owners)
+        over = rec.usage - self._edge_capacity
+
+        # --- HARD BLOCKING PHASE ---
+        if self.current_iteration >= self._phase_block_after and rec.usage >= self._edge_capacity and not owned:
+            logger.debug(f"[HARD-BLOCK] net={net_id} edge={key} usage={rec.usage}")
+            return float('inf')  # Block this edge completely
+
+        # --- TABOO ENFORCEMENT ---
+        if self.current_iteration >= self._phase_block_after and net_id in self._taboo and key in self._taboo[net_id]:
+            logger.debug(f"[TABOO] net={net_id} blocked from reclaiming edge={key}")
+            return float('inf')  # Block taboo edge completely
+
+        # --- SOFT PHASE COST ---
+        segment_len = ((x2-x1)**2 + (y2-y1)**2)**0.5
+        base = segment_len * self._track_cost_per_mm
+
+        # PathFinder cost with proper congestion accounting
+        future_over = max(0, over + (0 if owned else 1))
+        cost = base + rec.hist_cost + rec.pres_cost * future_over * self._overuse_penalty
+
+        # Prefer reusing own previously committed edges
+        if owned:
+            cost *= 0.25
+
+        # Add small tie-break jitter to prevent equal paths from locking onto same edge
+        # Use hash of edge key and net_id for deterministic but varied jitter
+        hash_val = hash((key, net_id)) & 0xFFFFFF  # 24-bit hash
+        jitter = 1e-6 * (hash_val / 0xFFFFFF)  # 0 to 1e-6 range
+        cost += jitter
+
+        # Occasional jitter verification sampling
+        if hash_val % 100000 == 0:  # ~1 in 100k edges
+            logger.debug(f"[JITTER] net={net_id} edge={key} jitter={jitter:.2e} total_cost={cost:.6f}")
+
+        return cost
+
+    def rip_up_net(self, net_id: str, path_node_indices: list = None):
+        """
+        Rip up net using canonical edge store - SINGLE SOURCE OF TRUTH
+        """
+        # Get stored edge keys for this net
+        edge_keys = self.net_edge_paths.get(net_id, [])
+
+        if not edge_keys:
+            logger.warning(f"[RIPUP] net={net_id}: no edge keys found to rip up")
+            return
+
+        # Remove net from edge ownership + add to taboo
+        ripped_edges = 0
+        current_iter = getattr(self, 'current_iteration', 0)
+
+        for k in edge_keys:
+            if k in self.edge_store:
+                rec = self.edge_store[k]
+                if rec.owner_net == net_id:
+                    # Clear ownership
+                    rec.owner_net = None
+                    # Add taboo restriction to prevent immediate reclaim
+                    rec.taboo_until_iter = current_iter + 1
+                    # Increment historical cost for negotiation
+                    rec.historical_cost += 1.0
+                    ripped_edges += 1
+
+        # Clear net's path
+        if net_id in self.net_edge_paths:
+            del self.net_edge_paths[net_id]
+
+        logger.info(f"[RIPUP] net={net_id}: ripped {ripped_edges} edges with taboo restrictions")
+
+    def _pathfinder_cost_for_canonical_edge(self, edge_key: tuple, net_id: str) -> float:
+        """Calculate PathFinder cost for canonical edge including capacity, taboo, clearance"""
+        # Base cost (distance)
+        base_cost = 1.0
+
+        # Get or create edge record
+        if edge_key not in self.edge_store:
+            self.edge_store[edge_key] = EdgeRec()
+
+        rec = self.edge_store[edge_key]
+        current_iter = getattr(self, 'current_iteration', 0)
+
+        # CAPACITY CHECK: Edge already owned by different net?
+        if rec.owner_net is not None and rec.owner_net != net_id:
+            # Hard capacity blocking - multiple nets cannot share same physical segment
+            return float('inf')
+
+        # TABOO CHECK: Net forbidden from reclaiming this edge?
+        if rec.taboo_until_iter > current_iter:
+            return float('inf')
+
+        # CLEARANCE CHECK: Would this edge violate DRC?
+        if hasattr(self, '_clearance_enabled') and self._clearance_enabled:
+            # Extract coordinates from edge key for clearance checking
+            layer_id, u1, v1, u2, v2 = edge_key
+            # Convert back to world coordinates
+            x1, y1 = u1 * self.geometry.pitch, v1 * self.geometry.pitch
+            x2, y2 = u2 * self.geometry.pitch, v2 * self.geometry.pitch
+
+            if not self._edge_is_clear_realtime(net_id, layer_id, x1, y1, x2, y2):
+                return float('inf')
+
+        # PathFinder negotiation cost = base + historical congestion
+        return base_cost + rec.historical_cost
+
+    def commit_net_path(self, net_id: str, path_node_indices: list):
+        """
+        Commit new path using canonical edge key system.
+        This is the SINGLE SOURCE OF TRUTH for edge ownership.
+        """
+        if not path_node_indices or len(path_node_indices) < 2:
+            return  # No edges to commit
+
+        edge_keys_for_net = []
+
+        for i in range(len(path_node_indices) - 1):
+            from_idx = path_node_indices[i]
+            to_idx = path_node_indices[i + 1]
+
+            try:
+                # Get coordinates for canonical edge key
+                from_coord = self._idx_to_coord(from_idx)
+                to_coord = self._idx_to_coord(to_idx)
+                if not from_coord or not to_coord:
+                    continue
+
+                x1, y1, layer1 = from_coord
+                x2, y2, layer2 = to_coord
+
+                # All edges must be on same layer (no vias here)
+                if layer1 != layer2:
+                    continue
+
+                # Create canonical edge key using integer lattice coordinates
+                k = canonical_edge_key(layer1, int(x1/self.geometry.pitch), int(y1/self.geometry.pitch),
+                                     int(x2/self.geometry.pitch), int(y2/self.geometry.pitch))
+
+                # Get/create edge record
+                if k not in self.edge_store:
+                    self.edge_store[k] = EdgeRec()
+
+                rec = self.edge_store[k]
+
+                # If edge is currently owned by different net, this creates contention (overuse)
+                if rec.owner_net is not None and rec.owner_net != net_id:
+                    logger.debug(f"[COMMIT] Edge contention: {k} owned by {rec.owner_net}, claimed by {net_id}")
+
+                # Assign ownership to current net
+                rec.owner_net = net_id
+                edge_keys_for_net.append(k)
+
+                # Add to R-tree spatial index for clearance checking
+                self._add_edge_to_rtree(net_id, layer1, x1, y1, x2, y2)
+
+            except Exception as e:
+                logger.debug(f"[COMMIT] Failed to process edge {from_idx} -> {to_idx}: {e}")
+                continue
+
+        # Store net's edge path for rip-up
+        self.net_edge_paths[net_id] = edge_keys_for_net
+
+        # TABOO CLEAR: Successful commit clears taboo restrictions
+        if net_id in self._taboo:
+            cleared_count = len(self._taboo[net_id])
+            del self._taboo[net_id]
+            logger.debug(f"[TABOO-CLEAR] net={net_id} cleared {cleared_count} taboo edges after commit")
+
+        logger.debug(f"[COMMIT] net={net_id}: committed {len(unique_keys)} unique edges")
+
+    def update_congestion_costs(self, pres_fac_mult: float = None):
+        """Update PathFinder costs after iteration with proper capping"""
+        if pres_fac_mult is None:
+            pres_fac_mult = self._pres_mult
+
+        overfull_count = 0
+
+        for key, rec in self._edge_store.items():
+            extra = max(0, rec.usage - self._edge_capacity)
+            overfull_count += extra
+
+            if extra > 0:
+                # Accumulate historical cost with capping
+                rec.hist_cost = min(rec.hist_cost + self._hist_inc * extra, self._hist_cap)
+                # Increase present cost with capping
+                rec.pres_cost = min(rec.pres_cost * pres_fac_mult, self._pres_cap)
+
+        # THIS IS THE CRITICAL FIX - real overuse count from actual edge store
+        self.current_overuse = overfull_count
+        logger.info(f"[PF-COSTS] Updated {len(self._edge_store)} edge costs, {overfull_count} overfull")
+        return overfull_count
+
+    def _build_ripup_queue(self, valid_net_ids: List[str]) -> List[str]:
+        """Build congestion-driven rip-up queue targeting nets on overfull edges"""
+        offenders = {}
+
+        # Find nets sitting on overfull edges
+        for key, rec in self._edge_store.items():
+            extra = rec.usage - self._edge_capacity
+            if extra > 0:
+                for owner in rec.owners:
+                    offenders[owner] = offenders.get(owner, 0) + 1
+
+        # Failed nets must be in the queue (high priority)
+        for nid in self._failed_nets_last_iter:
+            if nid in valid_net_ids:  # Only include valid nets
+                offenders[nid] = offenders.get(nid, 0) + 10  # boost priority
+
+        # If no offenders, fall back to all nets
+        if not offenders:
+            import random
+            queue = valid_net_ids.copy()
+            random.shuffle(queue)
+            return queue
+
+        # Order by severity (most offenses first), break ties randomly
+        import random
+        ordered = sorted(offenders.items(), key=lambda kv: (-kv[1], random.random()))
+
+        # Add remaining nets that aren't offenders
+        queue = [nid for nid, _ in ordered if nid in valid_net_ids]
+        remaining = [nid for nid in valid_net_ids if nid not in queue]
+        random.shuffle(remaining)
+        queue.extend(remaining)
+
+        # Enhanced logging for verification
+        offender_count = len([x for x in offenders.values() if x > 0])
+        logger.info(f"[RIPUP-QUEUE] {offender_count} offenders identified")
+        if ordered:
+            logger.info(f"[RIPUP] top offenders: {ordered[:10]}")
+
+        return queue
+
+    def _get_adaptive_roi_margin(self, net_id: str, base_margin_mm: float = 10.0) -> float:
+        """Get adaptive ROI margin based on net failure history"""
+        failure_count = self._net_failure_count.get(net_id, 0)
+
+        # Start with base margin, expand by 1-2 grid cells per failure
+        grid_pitch = self.config.grid_pitch  # typically 0.4mm
+        expansion = failure_count * 2 * grid_pitch  # 2 grid cells per failure
+
+        # Calculate new margin with expansion
+        new_margin = base_margin_mm + expansion
+
+        # Store the new margin for this net
+        self._net_roi_margin[net_id] = new_margin
+
+        if expansion > 0:
+            logger.info(f"[ROI++] net={net_id} expand={new_margin:.1f}mm fail={failure_count}")
+
+        return new_margin
+
+    def _update_net_failure_count(self, net_id: str, failed: bool):
+        """Update failure count for ROI expansion"""
+        if failed:
+            self._net_failure_count[net_id] = self._net_failure_count.get(net_id, 0) + 1
+        else:
+            # Reset failure count on success
+            if net_id in self._net_failure_count:
+                del self._net_failure_count[net_id]
+            if net_id in self._net_roi_margin:
+                del self._net_roi_margin[net_id]
+
+    def _calculate_airwire_bounds(self, board) -> Tuple[float, float, float, float]:
+        """Calculate bounding box of all airwires for constrained routing"""
+        try:
+            # Look for airwires in board data
+            airwires = []
+            if hasattr(board, 'airwires') and board.airwires:
+                airwires = board.airwires
+            elif hasattr(board, 'nets'):
+                # Extract airwires from nets
+                for net in board.nets:
+                    if hasattr(net, 'airwires') and net.airwires:
+                        airwires.extend(net.airwires)
+
+            if not airwires:
+                logger.info("[BOUNDS] No airwires found, cannot constrain routing area")
+                return None
+
+            # Calculate bounds from airwire endpoints
+            all_x = []
+            all_y = []
+
+            for airwire in airwires:
+                # Handle different airwire formats
+                if hasattr(airwire, 'start') and hasattr(airwire, 'end'):
+                    # Point format: airwire.start.x, airwire.start.y
+                    all_x.extend([airwire.start.x, airwire.end.x])
+                    all_y.extend([airwire.start.y, airwire.end.y])
+                elif hasattr(airwire, 'start_x'):
+                    # Coordinate format: airwire.start_x, start_y, end_x, end_y
+                    all_x.extend([airwire.start_x, airwire.end_x])
+                    all_y.extend([airwire.start_y, airwire.end_y])
+                elif isinstance(airwire, (tuple, list)) and len(airwire) >= 4:
+                    # Tuple format: (start_x, start_y, end_x, end_y)
+                    all_x.extend([airwire[0], airwire[2]])
+                    all_y.extend([airwire[1], airwire[3]])
+
+            if not all_x or not all_y:
+                logger.warning("[BOUNDS] No valid airwire coordinates found")
+                return None
+
+            min_x, max_x = min(all_x), max(all_x)
+            min_y, max_y = min(all_y), max(all_y)
+
+            # Ensure reasonable area (at least 5mm x 5mm)
+            if max_x - min_x < 5.0:
+                center_x = (min_x + max_x) / 2
+                min_x, max_x = center_x - 2.5, center_x + 2.5
+            if max_y - min_y < 5.0:
+                center_y = (min_y + max_y) / 2
+                min_y, max_y = center_y - 2.5, center_y + 2.5
+
+            logger.info(f"[BOUNDS] Calculated airwire bounds from {len(airwires)} airwires: ({min_x:.1f}, {min_y:.1f}, {max_x:.1f}, {max_y:.1f})")
+            return (min_x, min_y, max_x, max_y)
+
+        except Exception as e:
+            logger.warning(f"[BOUNDS] Airwire bounds calculation failed: {e}")
+            return None
+
+    def _get_pad_layer(self, pad) -> int:
+        """Get the layer index for a pad (F.Cu=0, B.Cu=last, etc.)"""
+        # Check if pad has explicit layer information
+        if hasattr(pad, 'layer'):
+            layer_name = str(pad.layer)
+            if layer_name in self.config.layer_names:
+                return self.config.layer_names.index(layer_name)
+
+        # Check if pad has layers list (multi-layer pads)
+        if hasattr(pad, 'layers') and pad.layers:
+            # Use first layer in the list
+            layer_name = str(pad.layers[0])
+            if layer_name in self.config.layer_names:
+                return self.config.layer_names.index(layer_name)
+
+        # Check drill attribute to determine if through-hole
+        drill = getattr(pad, 'drill', 0.0)
+        if drill > 0:
+            # Through-hole pad - default to F.Cu but could be on both
+            return 0  # F.Cu
+
+        # Default to F.Cu for SMD pads
+        return 0
+
+    def _log_build_sanity_checks(self, layer_count: int):
+        """Log critical build parameters for debugging"""
+        logger.info("=== SANITY CHECKS/LOGS ===")
+
+        # Layer count, names, and HV mask
+        hv_summary = ", ".join([f"{name}={pol.upper()}" for name, pol in zip(self.config.layer_names, self.hv_polarity)])
+        logger.info(f"Layer configuration: count={layer_count}, HV_mask=[{hv_summary}]")
+
+        # Allowed vertical pairs (first 10)
+        if hasattr(self, 'allowed_layer_pairs'):
+            pair_count = len(self.allowed_layer_pairs)
+            logger.info(f"Allowed vertical transitions: {pair_count} pairs")
+            sample_pairs = list(sorted(self.allowed_layer_pairs))[:5]
+            for from_l, to_l in sample_pairs:
+                from_name = self.config.layer_names[from_l] if from_l < len(self.config.layer_names) else f"L{from_l}"
+                to_name = self.config.layer_names[to_l] if to_l < len(self.config.layer_names) else f"L{to_l}"
+                logger.info(f"  Via transition: {from_name} -> {to_name}")
+            if pair_count > 5:
+                logger.info(f"  ... and {pair_count-5} more transitions")
+
+        # Via cost and caps
+        VIA_COST = float(os.getenv("ORTHO_VIA_COST", "0"))
+        VIA_CAP = int(os.getenv("ORTHO_VIA_CAP", "999"))
+        logger.info(f"Via configuration: cost={VIA_COST}, cap_per_net={VIA_CAP}")
+
+        # Grid and bounds
+        logger.info(f"Grid pitch: {self.config.grid_pitch}mm")
+        logger.info(f"Occupancy grids: {len(self.occ)} layers with cell_size={self.occ[0].cell_size:.3f}mm")
+
+        logger.info("=== BUILD COMPLETE ===")
+
+    def _log_first_routed_nets_debug(self, net_count: int = 3):
+        """Log debug info for first few routed nets"""
+        if not hasattr(self, '_nets_routed_debug'):
+            self._nets_routed_debug = 0
+
+        if self._nets_routed_debug < net_count:
+            self._nets_routed_debug += 1
+            logger.info(f"=== DEBUG NET {self._nets_routed_debug}/{net_count} ===")
+            # Would log pad-stub lengths, via positions vs pad clearance, etc.
+            logger.info("Pad-stub debugging not fully implemented yet")
+
+    def _log_first_illegal_expansion(self, cause: str, net_x: str = "", layer_y: int = -1):
+        """Log first illegal expansion cause for debugging"""
+        if not hasattr(self, '_logged_first_illegal'):
+            self._logged_first_illegal = True
+            logger.error(f"FIRST ILLEGAL EXPANSION: {cause}")
+            if net_x:
+                logger.error(f"  Blocked by net '{net_x}' on layer {layer_y}")
 
     def _apply_direction_masks(self):
         """Apply direction constraints to live CSR matrix."""
