@@ -206,3 +206,6 @@ class PathFinderConfig:
     # Multi-terminal net support (Phase 2)
     multi_terminal_enabled: bool = True  # Enable MST-based multi-terminal routing
     multi_terminal_max_retries: int = 3  # Max retries per pad connection
+
+    # Cost weighting for routing
+    base_cost_weight: float = 0.3  # Weight for path length penalty (1.0=optimize length, 0.01=optimize completion)

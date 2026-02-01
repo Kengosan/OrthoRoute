@@ -89,12 +89,19 @@ def analyze_board_characteristics(
         board_width_mm = lattice.x_steps * grid_pitch_mm
         board_height_mm = lattice.y_steps * grid_pitch_mm
 
-    # All layers except F.Cu (0) and B.Cu (Nz-1)
-    signal_layers = list(range(1, layer_count - 1))
+    # For 2-layer boards, use BOTH layers for routing (no internal layers)
+    # For 4+ layer boards, internal layers (1 to N-2) are the signal layers
+    if layer_count <= 2:
+        # 2-layer board: use both F.Cu (0) and B.Cu (1) for routing
+        signal_layers = list(range(layer_count))
+    else:
+        # Multi-layer board: internal layers only (excluding outer copper)
+        signal_layers = list(range(1, layer_count - 1))
+
     plane_layers = set()  # Could be extracted from board_data if available
 
     logger.info(f"Board: {board_width_mm:.1f}mm × {board_height_mm:.1f}mm")
-    logger.info(f"Layers: {layer_count} total, {len(signal_layers)} signal")
+    logger.info(f"Layers: {layer_count} total, {len(signal_layers)} signal (2-layer: all layers used)" if layer_count <= 2 else f"Layers: {layer_count} total, {len(signal_layers)} signal")
     logger.info(f"Grid pitch: {grid_pitch_mm}mm")
 
     # Compute usable area (simplified - could subtract keepouts)
@@ -226,7 +233,19 @@ def _assign_hv_layers_by_demand(
 
     Returns:
         (h_layers, v_layers, demand_h_percentage)
+
+    Note:
+        For 2-layer boards, BOTH layers are assigned to BOTH h_layers and v_layers
+        because 2-layer boards use 'hv' direction on both layers (no H/V separation).
     """
+    # Special case: 2-layer boards use BOTH directions on BOTH layers
+    # No H/V separation - both layers handle both horizontal and vertical routing
+    if len(signal_layers) <= 2:
+        h_layers = set(signal_layers)
+        v_layers = set(signal_layers)
+        logger.info(f"[2-LAYER-HV] Both layers assigned to both H and V (no separation)")
+        return h_layers, v_layers, 0.5
+
     if not tasks:
         # Fallback: alternating assignment
         h_layers = set(l for l in signal_layers if (l % 2 == 1) == anchor_top_is_h)

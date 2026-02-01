@@ -290,12 +290,17 @@ class LatticeBuilderMixin:
             self._spatial_index[layer] = layer_nodes
 
             # Create edges only for legal directions using geometry validation
-            if layer == 0:
-                max_trace_steps = 2  # F.Cu: only short escapes
+            # For 2-layer boards: ALL layers need full routing (no escape-only restriction)
+            # For 4+ layer boards: Layer 0 (F.Cu) is escape-only (2 steps max)
+            if layer == 0 and layers > 2:
+                max_trace_steps = 2  # F.Cu: only short escapes (multi-layer boards only)
                 escape_cost = 1.0
+                logger.debug(f"Layer 0 (F.Cu): escape-only mode (max_trace_steps=2)")
             else:
                 max_trace_steps = max(self.geometry.x_steps, self.geometry.y_steps)
                 escape_cost = 1.0
+                if layer == 0:
+                    logger.info(f"Layer 0 (F.Cu): full routing mode for 2-layer board")
 
             if direction == 'h':
                 # H-layer: only horizontal edges

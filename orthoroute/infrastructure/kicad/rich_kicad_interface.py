@@ -42,7 +42,10 @@ class BoardData:
 
 def fetch_board_and_drc():
     """Fetch board and DRC data using IPC API (proper method)"""
-    from kicad import KiCad
+    try:
+        from kipy import KiCad  # kicad-python >= 0.5.0
+    except ImportError:
+        from kicad import KiCad  # kicad-python < 0.5.0
 
     try:
         kc = KiCad()                                   # IPC session (nng under the hood)
@@ -282,33 +285,88 @@ class RichKiCadInterface:
             logger.error(traceback.format_exc())
             return None
 
+    def _build_pad_to_component_map(self, board) -> dict:
+        """Build mapping from pad ID to component reference using footprints"""
+        pad_to_comp = {}
+        try:
+            footprints = _ipc_retry(board.get_footprints, "get_footprints", max_retries=3, sleep_s=0.5)
+            for fp in footprints:
+                # Get component reference from reference_field (kipy API)
+                ref_field = getattr(fp, 'reference_field', None)
+                comp_ref = ''
+                if ref_field:
+                    text_obj = getattr(ref_field, 'text', None)
+                    if text_obj:
+                        comp_ref = getattr(text_obj, 'value', '') or ''
+
+                if not comp_ref:
+                    continue
+
+                # Get footprint position
+                fp_pos = getattr(fp, 'position', None)
+                fp_x = float(getattr(fp_pos, 'x', 0)) / 1000000.0 if fp_pos else 0.0
+                fp_y = float(getattr(fp_pos, 'y', 0)) / 1000000.0 if fp_pos else 0.0
+
+                # Store component reference keyed by position rounded to 0.01mm
+                # This will be used to map pads to components
+                key = (round(fp_x, 2), round(fp_y, 2))
+                pad_to_comp[key] = comp_ref
+
+        except Exception as e:
+            logger.warning(f"Failed to build pad-to-component map: {e}")
+
+        return pad_to_comp
+
     def _extract_pads(self, board) -> List[Dict]:
         """Extract all pads with detailed geometry using KiCad API"""
         pads = []
+
+        # Build pad-to-component mapping from footprints first
+        # Since board.get_pads() doesn't include footprint info, we need this mapping
+        footprint_positions = {}
+        try:
+            footprints = _ipc_retry(board.get_footprints, "get_footprints", max_retries=3, sleep_s=0.5)
+            for fp in footprints:
+                ref_field = getattr(fp, 'reference_field', None)
+                comp_ref = ''
+                if ref_field:
+                    text_obj = getattr(ref_field, 'text', None)
+                    if text_obj:
+                        comp_ref = getattr(text_obj, 'value', '') or ''
+
+                fp_pos = getattr(fp, 'position', None)
+                if fp_pos and comp_ref:
+                    fp_x = float(getattr(fp_pos, 'x', 0)) / 1000000.0
+                    fp_y = float(getattr(fp_pos, 'y', 0)) / 1000000.0
+                    # Store with rounded position as key
+                    footprint_positions[(round(fp_x, 1), round(fp_y, 1))] = comp_ref
+        except Exception as e:
+            logger.warning(f"Failed to extract footprint positions: {e}")
+
         try:
             # Use the correct KiCad API method
             all_pads = _ipc_retry(board.get_pads, "get_pads", max_retries=3, sleep_s=0.7)
             logger.info(f"Found {len(all_pads)} pads using KiCad API")
-            
+
             for i, p in enumerate(all_pads):
                 try:
                     # Extract pad data using object attributes (not dictionary access)
                     pos = getattr(p, 'position', None)
                     x = float(getattr(pos, 'x', 0.0)) / 1000000.0 if pos is not None else 0.0  # Convert nm to mm
                     y = float(getattr(pos, 'y', 0.0)) / 1000000.0 if pos is not None else 0.0  # Convert nm to mm
-                    
+
                     net_obj = getattr(p, 'net', None)
                     net_name = getattr(net_obj, 'name', '') if net_obj else ''
                     net_code = getattr(net_obj, 'code', 0) if net_obj else 0
-                    
+
                     pad_number = getattr(p, 'number', '')
-                    
+
                     # Get pad geometry from padstack
                     padstack = getattr(p, 'padstack', None)
                     width = 1.0  # Default
                     height = 1.0  # Default
                     drill = 0.0
-                    
+
                     if padstack:
                         # Get drill diameter
                         drill_obj = getattr(padstack, 'drill', None)
@@ -316,7 +374,7 @@ class RichKiCadInterface:
                             drill_dia = getattr(drill_obj, 'diameter', None)
                             if drill_dia and hasattr(drill_dia, 'x'):
                                 drill = float(getattr(drill_dia, 'x', 0.0)) / 1000000.0
-                        
+
                         # Get pad size from copper layers
                         copper_layers = getattr(padstack, 'copper_layers', [])
                         if copper_layers and len(copper_layers) > 0:
@@ -325,10 +383,16 @@ class RichKiCadInterface:
                             if size:
                                 width = float(getattr(size, 'x', 1000000.0)) / 1000000.0
                                 height = float(getattr(size, 'y', 1000000.0)) / 1000000.0
-                    
-                    # Get component reference
-                    footprint = getattr(p, 'footprint', None)
-                    component_ref = getattr(footprint, 'reference', '') if footprint else ''
+
+                    # Find component reference by looking for nearby footprint
+                    component_ref = ''
+                    # Search for footprint within ±25mm of pad position (large components like RP2040)
+                    best_dist = float('inf')
+                    for (fx, fy), ref in footprint_positions.items():
+                        dist = abs(fx - x) + abs(fy - y)  # Manhattan distance
+                        if dist < 25.0 and dist < best_dist:
+                            best_dist = dist
+                            component_ref = ref
                     
                     # Determine layers
                     layers = []
@@ -417,28 +481,45 @@ class RichKiCadInterface:
             # Use the correct KiCad API method
             board_tracks = _ipc_retry(board.get_tracks, "get_tracks", max_retries=3, sleep_s=0.5)
             logger.info(f"Found {len(board_tracks)} tracks using KiCad API")
-            
+
             for track in board_tracks:
                 try:
+                    # kicad-python Track object uses properties, not dict access
+                    # Coordinates are in nanometers, convert to mm
+                    start = getattr(track, 'start', None)
+                    end = getattr(track, 'end', None)
+
+                    start_x = float(getattr(start, 'x', 0)) / 1000000.0 if start else 0.0
+                    start_y = float(getattr(start, 'y', 0)) / 1000000.0 if start else 0.0
+                    end_x = float(getattr(end, 'x', 0)) / 1000000.0 if end else 0.0
+                    end_y = float(getattr(end, 'y', 0)) / 1000000.0 if end else 0.0
+
+                    width = float(getattr(track, 'width', 200000)) / 1000000.0  # nm to mm
+                    layer = getattr(track, 'layer', 'F.Cu')
+
+                    # Get net name from net object
+                    net = getattr(track, 'net', None)
+                    net_name = getattr(net, 'name', '') if net else ''
+
                     track_data = {
-                        'start_x': track.get('start_x', 0),
-                        'start_y': track.get('start_y', 0),
-                        'end_x': track.get('end_x', 0),
-                        'end_y': track.get('end_y', 0),
-                        'width': track.get('width', 0.2),
-                        'layer': track.get('layer', 'F.Cu'),
-                        'net_name': track.get('net_name', '')
+                        'start_x': start_x,
+                        'start_y': start_y,
+                        'end_x': end_x,
+                        'end_y': end_y,
+                        'width': width,
+                        'layer': layer,
+                        'net_name': net_name
                     }
-                    
+
                     tracks.append(track_data)
-                    
+
                 except Exception as e:
                     logger.warning(f"Error extracting track: {e}")
                     continue
-                    
+
         except Exception as e:
             logger.error(f"Error extracting tracks: {e}")
-            
+
         return tracks
 
     def _extract_zones(self, board) -> List[Dict]:

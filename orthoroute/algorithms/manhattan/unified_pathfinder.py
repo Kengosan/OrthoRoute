@@ -1209,10 +1209,12 @@ class Lattice3D:
         # Count H/V edges (exclude outer layers unless 2-layer board)
         planar_layers = range(0, self.layers) if self.layers <= 2 else range(1, self.layers - 1)
         for z in planar_layers:
-            if self.layer_dir[z] == 'h':
-                edge_count += 2 * self.y_steps * (self.x_steps - 1)
-            else:  # 'v'
-                edge_count += 2 * self.x_steps * (self.y_steps - 1)
+            direction = self.layer_dir[z]
+            # For 'hv' layers (2-layer boards), count BOTH horizontal and vertical edges
+            if direction in ('h', 'hv'):
+                edge_count += 2 * self.y_steps * (self.x_steps - 1)  # Horizontal edges
+            if direction in ('v', 'hv'):
+                edge_count += 2 * self.x_steps * (self.y_steps - 1)  # Vertical edges
 
         # Count via edges using ACTUAL legal pairs (not parameter guess)
         legal_via_pairs_set = self.get_legal_via_pairs(self.layers)
@@ -1226,7 +1228,8 @@ class Lattice3D:
         for z in planar_layers:
             direction = self.layer_dir[z]
 
-            if direction == 'h':
+            # Create horizontal edges if direction allows (h or hv)
+            if direction in ('h', 'hv'):
                 for y in range(self.y_steps):
                     for x in range(self.x_steps - 1):
                         u = self.node_idx(x, y, z)
@@ -1239,7 +1242,9 @@ class Lattice3D:
 
                         graph.add_edge(u, v, self.pitch)
                         graph.add_edge(v, u, self.pitch)
-            else:  # direction == 'v'
+
+            # Create vertical edges if direction allows (v or hv)
+            if direction in ('v', 'hv'):
                 for x in range(self.x_steps):
                     for y in range(self.y_steps - 1):
                         u = self.node_idx(x, y, z)
@@ -1648,9 +1653,9 @@ class ROIExtractor:
         depth = 0
         # Apply stagnation bonus: +0.6mm per stagnation mark (grid_pitch=0.4mm → ~1.5 steps)
         # CRITICAL: Limit max_depth to prevent full-board expansion
-        # With radius=60, max_depth=80 gives ~32mm radius (covers most routes)
-        # Board is 244×227mm, so depth=800 would cover ENTIRE board!
-        max_depth = min(int(initial_radius + stagnation_bonus * 2.0), 80)
+        # max_depth must be >= SHORT net threshold (125 steps) to avoid ROI island splitting
+        # For smaller boards, depth 150 covers ~60mm radius which is sufficient
+        max_depth = min(int(initial_radius + stagnation_bonus * 2.0), 150)
         met = False
 
         # Limit ROI size for efficiency - smaller ROIs converge MUCH faster on GPU!
@@ -2616,38 +2621,33 @@ class PathFinderRouter:
                 p2_id = self._pad_key(p2)
 
                 if p1_id in self.pad_to_node and p2_id in self.pad_to_node:
-                    # Route from PORTAL positions (escape vias), not from pads
-                    # Portals are pre-computed and stored in self.portals
-                    if p1_id in self.portals and p2_id in self.portals:
+                    # Default: Route from PAD positions (direct pad-to-pad)
+                    src = self.pad_to_node[p1_id]
+                    dst = self.pad_to_node[p2_id]
+                    self.net_pad_ids[net_name] = (p1_id, p2_id)  # Track pad IDs
+
+                    # If portal_enabled AND both pads have portals, use portal positions instead
+                    if self.config.portal_enabled and p1_id in self.portals and p2_id in self.portals:
                         p1_portal = self.portals[p1_id]
                         p2_portal = self.portals[p2_id]
 
                         # CRITICAL FIX: Use portal's computed entry_layer (routing layer, NOT F.Cu!)
-                        # Portals land on internal routing layers (1-17), NOT on F.Cu (0)
-                        # The escape planner already handles F.Cu → portal transitions
-                        entry_layer = p1_portal.entry_layer  # Use portal's routing layer
-                        exit_layer = p2_portal.entry_layer   # Use portal's routing layer
+                        entry_layer = p1_portal.entry_layer
+                        exit_layer = p2_portal.entry_layer
 
                         # Convert portal positions to node indices
                         src = self.lattice.node_idx(p1_portal.x_idx, p1_portal.y_idx, entry_layer)
                         dst = self.lattice.node_idx(p2_portal.x_idx, p2_portal.y_idx, exit_layer)
+                        self.net_portal_layers[net_name] = (entry_layer, exit_layer)  # Track layers
 
-                        if src != dst:
-                            tasks[net_name] = (src, dst)
-                            self.net_pad_ids[net_name] = (p1_id, p2_id)  # Track pad IDs
-                            self.net_portal_layers[net_name] = (entry_layer, exit_layer)  # Track layers
-                            kept += 1
-                        else:
-                            same_cell_trivial += 1
-                            self.net_paths[net_name] = [src]
-                            logger.debug(f"Net {net_name}: trivial route (portals at same position)")
+                    # Add to tasks (works with both pad nodes and portal nodes)
+                    if src != dst:
+                        tasks[net_name] = (src, dst)
+                        kept += 1
                     else:
-                        # Portals not found - skip this net
-                        if p1_id not in self.portals:
-                            logger.debug(f"Net {net_name}: no portal for {p1_id}")
-                        if p2_id not in self.portals:
-                            logger.debug(f"Net {net_name}: no portal for {p2_id}")
-                        unmapped_pads += 1
+                        same_cell_trivial += 1
+                        self.net_paths[net_name] = [src]
+                        logger.debug(f"Net {net_name}: trivial route (same position)")
                 else:
                     unmapped_pads += 1
                     if unmapped_pads <= 3:  # Log first 3 examples
@@ -2679,11 +2679,11 @@ class PathFinderRouter:
         """
         Accumulate via column and segment usage for a committed path.
         Also registers via keepouts to prevent other nets from routing tracks through via locations.
-        """
-        if not hasattr(self, 'via_col_use') and not hasattr(self, 'via_seg_use'):
-            return  # Pooling not enabled
 
-        # Ensure via_keepouts_map exists
+        NOTE: Via keepouts are ALWAYS registered (even when pooling is disabled)
+        because they're needed for owner-aware routing.
+        """
+        # Ensure via_keepouts_map exists (ALWAYS, not just when pooling enabled)
         if not hasattr(self, '_via_keepouts_map'):
             self._via_keepouts_map = {}
 
@@ -2724,11 +2724,12 @@ class PathFinderRouter:
                             self._via_keepouts_map[key] = net_id
 
     def _rebuild_via_usage_from_committed(self):
-        """Rebuild via column/segment usage from all currently committed net paths"""
-        if not hasattr(self, 'via_col_use') and not hasattr(self, 'via_seg_use'):
-            return
+        """Rebuild via column/segment usage from all currently committed net paths.
 
-        # Clear counters
+        NOTE: Always rebuilds via_keepouts_map even if pooling arrays don't exist.
+        This is needed for owner-aware via blocking.
+        """
+        # Clear counters (if pooling is enabled)
         if hasattr(self, 'via_col_use'):
             self.via_col_use.fill(0)
         if hasattr(self, 'via_seg_use'):
@@ -3174,7 +3175,8 @@ class PathFinderRouter:
         keepout_block_cost = 1e9
 
         # Convert indptr/indices to CPU for indexing (they're small, cached once)
-        if is_gpu:
+        # Check if arrays have .get() method (CuPy arrays)
+        if hasattr(indptr, 'get'):
             if not hasattr(self, '_indptr_cpu_cache'):
                 self._indptr_cpu_cache = indptr.get()
                 self._indices_cpu_cache = indices.get()
@@ -3751,8 +3753,16 @@ class PathFinderRouter:
 
             # Only start tracking failures after iteration 4
             if it > 4:
+                # CRITICAL FIX: Don't count ripped nets as failures
+                # They were intentionally cleared, not routing failures
+                ripped_this_iter = getattr(self, '_last_ripped', set())
+
                 # Update failure counts based on which nets have paths
                 for net_id in tasks.keys():
+                    # Skip ripped nets - they were intentionally cleared
+                    if net_id in ripped_this_iter:
+                        continue
+
                     has_path = bool(self.net_paths.get(net_id))
                     if not has_path:
                         # Net failed to route
@@ -3845,7 +3855,7 @@ class PathFinderRouter:
                 if it <= BARREL_PHASE_1_ITERS:
                     # PHASE 1: Apply penalty to reduce barrel conflicts
                     pres = self.accounting.present
-                    conflict_penalty = min(10.0 * pres_fac, 100.0)  # Cap at 100
+                    conflict_penalty = min(10.0 * pres_fac, 100.0)  # Original: 10x pres_fac, cap at 100
 
                     if hasattr(pres, 'get'):
                         # GPU array
@@ -4232,6 +4242,7 @@ class PathFinderRouter:
         return {
             'success': success,
             'converged': success,  # Edge convergence = success
+            'paths': self.net_paths,  # Include paths even when not fully converged
             'barrel_conflicts': final_barrel_conflicts,
             'excluded_nets': len(excluded_nets),
             'excluded_net_ids': list(excluded_nets),
@@ -4665,12 +4676,24 @@ class PathFinderRouter:
 
             # OWNER-AWARE FILTERING: Remove nodes owned by OTHER nets
             # This prevents routing through via barrels - THE FIX for dangling vias!
-            roi_nodes = self._filter_roi_by_ownership(roi_nodes, net_id)
+            # TEMPORARILY DISABLED to test if this is causing routing failures
+            # roi_nodes = self._filter_roi_by_ownership(roi_nodes, net_id)
+
+            # CRITICAL: Always preserve src and dst in ROI after ownership filtering
+            # They may be filtered out if sharing coordinates with other nets
+            roi_set = set(roi_nodes.tolist())
+            if src not in roi_set:
+                roi_nodes = np.append(roi_nodes, src)
+                logger.debug(f"[ROI-FIX] Re-added src {src} after ownership filter")
+            if dst not in roi_set:
+                roi_nodes = np.append(roi_nodes, dst)
+                logger.debug(f"[ROI-FIX] Re-added dst {dst} after ownership filter")
+
             # Rebuild mapping after ownership filtering
             global_to_roi = np.full(len(costs), -1, dtype=np.int32)
             global_to_roi[roi_nodes] = np.arange(len(roi_nodes), dtype=np.int32)
 
-            # Final sanity check
+            # Final sanity check (should never fail now)
             if global_to_roi[src] < 0:
                 logger.error(f"BUG: src {src} not in ROI after all additions!")
             if global_to_roi[dst] < 0:
@@ -4692,6 +4715,13 @@ class PathFinderRouter:
             path = None
             entry_layer = exit_layer = None
 
+            # Apply owner-aware via keepouts (block via barrels owned by other nets)
+            # Only enable for smaller boards (<100 nets) due to O(N×M) scaling
+            via_keepouts_map = getattr(self, '_via_keepouts_map', {})
+            use_via_keepouts = total < 100 and len(via_keepouts_map) > 0
+            if use_via_keepouts:
+                self._apply_owner_aware_via_keepouts(net_id, costs)
+
             pathfinding_start = time.time()
             if use_portals:
                 # Route with multi-source/multi-sink using portal seeds
@@ -4707,6 +4737,10 @@ class PathFinderRouter:
                     logger.info(f"[DEBUG] Portal routing failed, falling back to normal routing")
                 path = self.solver.find_path_roi(src, dst, costs, roi_nodes, global_to_roi)
             pathfinding_time = time.time() - pathfinding_start
+
+            # Restore via keepout costs after pathfinding
+            if use_via_keepouts:
+                self._restore_via_keepout_costs(costs)
 
             # If ROI fails and we haven't exhausted fallback quota, try larger ROI
             if (not path or len(path) <= 1) and self.full_graph_fallback_count < 5:
