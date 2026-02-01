@@ -2986,13 +2986,17 @@ class PathFinderRouter:
 
         This ensures that via columns and segments used by pad escape vias
         are properly tracked, preventing routing conflicts.
+
+        NOTE: Via keepouts are ALWAYS registered even if via pooling arrays don't exist.
+        This is critical for owner-aware routing to work after rip-up recovery.
         """
         if not hasattr(self, '_escape_vias') or not self._escape_vias:
             return
 
-        if not hasattr(self, 'via_col_use') and not hasattr(self, 'via_seg_use'):
-            # Via spatial tracking not enabled
-            return
+        # Check which tracking arrays are available (pooling may be disabled)
+        has_col = hasattr(self, 'via_col_use')
+        has_seg = hasattr(self, 'via_seg_use')
+        # NOTE: Do NOT early return here - keepouts must always be registered!
 
         tracked_count = 0
 
@@ -3022,12 +3026,12 @@ class PathFinderRouter:
             if z_lo > z_hi:
                 z_lo, z_hi = z_hi, z_lo
 
-            # Track in column usage
-            if hasattr(self, 'via_col_use'):
+            # Track in column usage (if pooling enabled)
+            if has_col:
                 self.via_col_use[xu, yu] += 1
 
-            # Track in segment usage
-            if hasattr(self, 'via_seg_use'):
+            # Track in segment usage (if pooling enabled)
+            if has_seg:
                 for z in range(z_lo, z_hi):
                     seg_idx = z - 1  # Segments indexed from 0
                     if 0 <= seg_idx < self._segZ:
@@ -4671,7 +4675,8 @@ class PathFinderRouter:
             if nodes_to_add:
                 roi_nodes = np.append(roi_nodes, nodes_to_add)
                 # Rebuild mapping to include new nodes
-                global_to_roi = np.full(len(costs), -1, dtype=np.int32)
+                # CRITICAL FIX: Use len(self.graph.indptr) - 1 (node count), NOT len(costs) (edge count)
+                global_to_roi = np.full(len(self.graph.indptr) - 1, -1, dtype=np.int32)
                 global_to_roi[roi_nodes] = np.arange(len(roi_nodes), dtype=np.int32)
 
             # OWNER-AWARE FILTERING: Remove nodes owned by OTHER nets
@@ -4690,7 +4695,8 @@ class PathFinderRouter:
                 logger.debug(f"[ROI-FIX] Re-added dst {dst} after ownership filter")
 
             # Rebuild mapping after ownership filtering
-            global_to_roi = np.full(len(costs), -1, dtype=np.int32)
+            # CRITICAL FIX: Use len(self.graph.indptr) - 1 (node count), NOT len(costs) (edge count)
+            global_to_roi = np.full(len(self.graph.indptr) - 1, -1, dtype=np.int32)
             global_to_roi[roi_nodes] = np.arange(len(roi_nodes), dtype=np.int32)
 
             # Final sanity check (should never fail now)
@@ -4816,7 +4822,7 @@ class PathFinderRouter:
 
         return total_routed, total_failed
 
-    def _compute_layer_bias(self, accountant, graph, num_layers: int, alpha: float = 0.9, max_boost: float = 1.8):
+    def _compute_layer_bias(self, accountant, graph, num_layers: int, alpha: float = 0.9, max_boost: float = None):
         """
         Compute per-layer multiplicative bias (shape [L]) based on overuse distribution.
         Hot layers get bias > 1.0, cool layers stay at 1.0.
@@ -4851,8 +4857,11 @@ class PathFinderRouter:
             raw_bias = xp.ones(num_layers, dtype=xp.float32)
         else:
             shortfall = per_layer_over / maxv
-            # Baseline bias from document
-            raw_bias = 1.0 + 0.75 * shortfall  # Bias = 1.0 to 1.75
+            # Baseline bias: stronger for 2-layer boards (less routing freedom)
+            # 2-layer: 1.5x multiplier → 1.0 to 2.125 range
+            # Multi-layer: 0.75x multiplier → 1.0 to 1.75 range
+            bias_mult = 1.5 if num_layers <= 2 else 0.75
+            raw_bias = 1.0 + bias_mult * shortfall
 
         # EMA smoothing to prevent oscillation
         if not hasattr(self, "_layer_bias_ema"):
@@ -4861,6 +4870,9 @@ class PathFinderRouter:
             self._layer_bias_ema = (alpha * self._layer_bias_ema + (1.0 - alpha) * raw_bias).astype(xp.float32)
 
         # Clamp to prevent extreme penalties
+        # 2-layer boards need stronger bias range to force layer spreading
+        if max_boost is None:
+            max_boost = 2.5 if num_layers <= 2 else 1.8
         self._layer_bias_ema = xp.clip(self._layer_bias_ema, 1.0, max_boost)
 
         return self._layer_bias_ema
