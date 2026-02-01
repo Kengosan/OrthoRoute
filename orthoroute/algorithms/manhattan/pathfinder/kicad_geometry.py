@@ -35,14 +35,18 @@ class KiCadGeometry:
 
         # Layer configuration - set from board.layer_count
         self.layer_count = layer_count
-        # F.Cu (layer 0) must be vertical per requirement
+        # F.Cu (layer 0) must be vertical per requirement.
+        # Special-case 2-layer boards to allow both H/V on each layer.
         # All other layers alternate: v, h, v, h, ...
-        self.layer_directions = []
-        for i in range(layer_count):
-            if i == 0:  # F.Cu always vertical
-                self.layer_directions.append('v')
-            else:  # All other layers alternate (including B.Cu)
-                self.layer_directions.append('h' if (i % 2) == 1 else 'v')
+        if layer_count == 2:
+            self.layer_directions = ['hv', 'hv']  # Both directions for 2-layer flexibility
+        else:
+            self.layer_directions = []
+            for i in range(layer_count):
+                if i == 0:  # F.Cu always vertical
+                    self.layer_directions.append('v')
+                else:  # All other layers alternate (including B.Cu)
+                    self.layer_directions.append('h' if (i % 2) == 1 else 'v')
 
     def lattice_to_world(self, x_idx: int, y_idx: int) -> Tuple[float, float]:
         """Convert lattice indices to world coordinates"""
@@ -80,7 +84,9 @@ class KiCadGeometry:
         is_horizontal = (from_y == to_y and abs(from_x - to_x) == 1)
         is_vertical = (from_x == to_x and abs(from_y - to_y) == 1)
 
-        if direction == 'h':
+        if direction == 'hv':
+            return is_horizontal or is_vertical  # Both directions allowed (2-layer mode)
+        elif direction == 'h':
             return is_horizontal  # H-layers: only horizontal edges
         else:
             return is_vertical    # V-layers: only vertical edges

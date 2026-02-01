@@ -1089,8 +1089,13 @@ class Lattice3D:
         logger.info(f"Lattice: {self.x_steps}×{self.y_steps}×{layers} = {self.num_nodes:,} nodes")
 
     def _assign_directions(self) -> List[str]:
-        """F.Cu=V (vertical escape routing), internal layers alternate H/V"""
+        """F.Cu=V (vertical escape routing), internal layers alternate H/V.
+        Special-case 2-layer boards to allow both H/V on each layer for flexibility.
+        """
         dirs = []
+        if self.layers == 2:
+            # 2-layer boards: Both layers allow H/V for maximum routing flexibility
+            return ['hv', 'hv']
         for z in range(self.layers):
             if z == 0:
                 # F.Cu has vertical routing for escape stubs
@@ -1121,7 +1126,9 @@ class Lattice3D:
 
         # Check layer direction
         direction = self.get_legal_axis(from_layer)
-        if direction == 'h':
+        if direction == 'hv':
+            return True  # Both directions allowed (2-layer mode)
+        elif direction == 'h':
             return dy == 0 and dx == 1  # Horizontal: only ±X
         else:
             return dx == 0 and dy == 1  # Vertical: only ±Y
@@ -1139,6 +1146,10 @@ class Lattice3D:
 
         # Internal routing layers (exclude B.Cu which is layer_count-1)
         routing_layers = list(range(1, layer_count - 1))
+
+        # 2-layer boards: no internal layers, allow direct F.Cu <-> B.Cu vias
+        if layer_count == 2:
+            return {(0, 1), (1, 0)}
 
         logger.info(f"[VIA-PAIRS] layer_count={layer_count}, routing_layers={len(routing_layers)}, "
                    f"allow_any={allow_any}")
@@ -1195,8 +1206,9 @@ class Lattice3D:
         # Count edges to pre-allocate array (avoids MemoryError with 30M edges)
         edge_count = 0
 
-        # Count H/V edges (exclude outer layers 0 and self.layers-1)
-        for z in range(1, self.layers - 1):
+        # Count H/V edges (exclude outer layers unless 2-layer board)
+        planar_layers = range(0, self.layers) if self.layers <= 2 else range(1, self.layers - 1)
+        for z in planar_layers:
             if self.layer_dir[z] == 'h':
                 edge_count += 2 * self.y_steps * (self.x_steps - 1)
             else:  # 'v'
@@ -1210,8 +1222,8 @@ class Lattice3D:
         logger.info(f"Pre-allocating for {edge_count:,} edges ({via_edge_count:,} via edges for {len(legal_via_pairs_set)} pairs)")
         graph = CSRGraph(use_gpu, edge_capacity=edge_count)
 
-        # Build lateral edges (H/V discipline, exclude outer layers 0 and self.layers-1)
-        for z in range(1, self.layers - 1):
+        # Build lateral edges (H/V discipline, exclude outer layers unless 2-layer board)
+        for z in planar_layers:
             direction = self.layer_dir[z]
 
             if direction == 'h':
@@ -2147,7 +2159,11 @@ class PathFinderRouter:
         if getattr(self.config, "via_segment_pooling", True):
             # Segments between routing layers (1..Nz-2): segment z→z+1 stored at index z-1
             self._segZ = Nz - 2  # Number of routing layers
-            if use_via_gpu:
+            # Skip segment pooling for 2-layer boards (no internal segments)
+            if self._segZ <= 0:
+                self._segZ = 0
+                logger.info(f"[VIA-POOL] Segment pooling disabled for 2-layer board (no internal segments)")
+            elif use_via_gpu:
                 self.via_seg_cap = cp.full((Nx, Ny, self._segZ), int(getattr(self.config, "via_segment_capacity", 2)), dtype=cp.int8)
                 self.via_seg_use = cp.zeros((Nx, Ny, self._segZ), dtype=cp.int16)
                 self.via_seg_pres = cp.zeros((Nx, Ny, self._segZ), dtype=cp.float32)
@@ -2523,13 +2539,56 @@ class PathFinderRouter:
         gpu_threshold = getattr(self.config, 'gpu_roi_min_nodes', 1000)
         logger.info(f"[GPU-THRESHOLD] GPU pathfinding enabled for ROIs with > {gpu_threshold} nodes")
 
-        tasks = self._parse_requests(requests)
+        # Check for multi-terminal nets
+        multi_terminal_nets = []
+        two_terminal_nets = []
 
-        if not tasks:
+        for req in requests:
+            if hasattr(req, 'pads') and len(req.pads) > 2:
+                multi_terminal_nets.append(req)
+            else:
+                two_terminal_nets.append(req)
+
+        # Multi-terminal routing (Phase 2 feature)
+        if multi_terminal_nets and getattr(self.config, 'multi_terminal_enabled', False):
+            logger.info(f"[MULTI-TERMINAL] {len(multi_terminal_nets)} multi-terminal nets detected")
+            try:
+                from orthoroute.algorithms.manhattan.multi_terminal import MultiTerminalNetRouter
+
+                mt_router = MultiTerminalNetRouter(self)
+                mt_results = mt_router.route_all_nets(
+                    multi_terminal_nets,
+                    progress_cb=progress_cb,
+                    iteration_cb=iteration_cb
+                )
+
+                # Store multi-terminal routing results
+                for net_name, path in mt_results.items():
+                    if not net_name.startswith('_'):  # Skip metadata keys
+                        self.net_paths[net_name] = path
+
+                logger.info(f"[MULTI-TERMINAL] Completed routing for {len(multi_terminal_nets)} nets")
+                logger.info(f"[MULTI-TERMINAL] Stats: {mt_results.get('_stats', {})}")
+
+            except ImportError as e:
+                logger.warning(f"Multi-terminal router not available: {e}")
+                # Fall back to treating multi-terminal nets as 2-terminal
+                two_terminal_nets.extend(multi_terminal_nets)
+            except Exception as e:
+                logger.error(f"Multi-terminal routing failed: {e}")
+                two_terminal_nets.extend(multi_terminal_nets)
+
+        # Standard 2-terminal routing
+        tasks = self._parse_requests(two_terminal_nets)
+
+        if not tasks and not multi_terminal_nets:
             self._negotiation_ran = True
             return {}
 
-        result = self._pathfinder_negotiation(tasks, progress_cb, iteration_cb)
+        if tasks:
+            result = self._pathfinder_negotiation(tasks, progress_cb, iteration_cb)
+        else:
+            result = {}
 
         return result
 

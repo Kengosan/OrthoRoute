@@ -1,5 +1,6 @@
 # Core dependencies
 numpy>=1.20.0
+scipy>=1.7.0  # KDTree for multi-terminal net routing
 psutil>=5.8.0
 kicad-python>=0.5.0
 

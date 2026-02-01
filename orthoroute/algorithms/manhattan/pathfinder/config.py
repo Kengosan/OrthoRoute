@@ -202,3 +202,7 @@ class PathFinderConfig:
 
     # GPU ROI threshold configuration
     gpu_roi_min_nodes: int = 1000  # Minimum ROI nodes for GPU pathfinding (lowered from 5000 for 2-3x speedup)
+
+    # Multi-terminal net support (Phase 2)
+    multi_terminal_enabled: bool = True  # Enable MST-based multi-terminal routing
+    multi_terminal_max_retries: int = 3  # Max retries per pad connection
